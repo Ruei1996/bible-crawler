@@ -51,8 +51,9 @@ func main() {
 		log.Fatalf("Failed to load Bible spec: %v", err)
 	}
 
-	// 5. Initialize Scraper with spec
-	sc := scraper.NewBibleScraper(repo, bibleSpec)
+	// 5. Initialize Scraper — pass spec and config so it uses the correct
+	//    source URLs and tuning parameters from .env.
+	sc := scraper.NewBibleScraper(repo, bibleSpec, cfg)
 
 	// 6. Run Scraper
 	log.Println("Starting Bible Crawler...")

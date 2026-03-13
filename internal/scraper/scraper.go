@@ -18,6 +18,7 @@ import (
 	"sync"
 	"time"
 
+	"bible-crawler/internal/config"
 	"bible-crawler/internal/repository"
 	"bible-crawler/internal/spec"
 	"bible-crawler/internal/utils"
@@ -34,12 +35,14 @@ const (
 	LangEnglish = "english"
 )
 
-// BibleScraper holds the repository, Colly collector, and Bible spec.
-// All crawl parameters are driven by the spec; nothing is hard-coded.
+// BibleScraper holds the repository, Colly collector, Bible spec, and runtime
+// configuration. All crawl parameters (URLs, timeouts, concurrency) come from
+// the config so that nothing is hard-coded in application logic.
 type BibleScraper struct {
 	Repo             *repository.BibleRepository
 	C                *colly.Collector
 	Spec             *spec.BibleSpec
+	Cfg              *config.Config
 	globalChapStarts [66]int
 }
 
@@ -49,29 +52,35 @@ type BookMeta struct {
 	Index int // 0-based index into spec slices
 }
 
-// NewBibleScraper initializes a Colly collector and attaches the Bible spec.
-// bibleSpec must have been loaded from the JSON files before calling this.
-func NewBibleScraper(repo *repository.BibleRepository, bibleSpec *spec.BibleSpec) *BibleScraper {
+// NewBibleScraper initializes a Colly collector with settings from cfg and
+// attaches the Bible spec. bibleSpec must have been populated by cmd/spec-builder
+// before this is called.
+func NewBibleScraper(repo *repository.BibleRepository, bibleSpec *spec.BibleSpec, cfg *config.Config) *BibleScraper {
 	c := colly.NewCollector(
-		colly.AllowedDomains("springbible.fhl.net"),
+		// Restrict crawling to the configured source domain so accidental
+		// off-domain redirects are rejected rather than followed.
+		colly.AllowedDomains(cfg.SourceDomain),
 		colly.UserAgent("Mozilla/5.0 (compatible; BibleCrawler/1.0; +http://yourdomain.com)"),
 		colly.Async(true),
-		// Allow revisiting so chapter 1 pages are also processed in phase 2.
+		// AllowURLRevisit is needed because the same global chapter index
+		// is visited twice (once for ZH, once for EN) with different contexts.
 		colly.AllowURLRevisit(),
 	)
 
-	// Moderate rate limiting: 5 parallel requests, 200ms + 0–100ms jitter.
+	// Rate limiting — all values are read from config so operators can tune
+	// behaviour via .env without recompiling.
 	c.Limit(&colly.LimitRule{
-		DomainGlob:  "*springbible.fhl.net*",
-		Parallelism: 5,
-		Delay:       200 * time.Millisecond,
-		RandomDelay: 100 * time.Millisecond,
+		DomainGlob:  "*" + cfg.SourceDomain + "*",
+		Parallelism: cfg.CrawlerParallelism,
+		Delay:       time.Duration(cfg.CrawlerDelayMS) * time.Millisecond,
+		RandomDelay: time.Duration(cfg.CrawlerRandomDelayMS) * time.Millisecond,
 	})
 
 	return &BibleScraper{
 		Repo:             repo,
 		C:                c,
 		Spec:             bibleSpec,
+		Cfg:              cfg,
 		globalChapStarts: bibleSpec.GlobalChapStarts(),
 	}
 }
@@ -298,31 +307,29 @@ func (s *BibleScraper) crawlChapters(books []BookMeta) {
 				continue
 			}
 
-			// Queue Chinese (和合本) request.
+			// Queue Chinese (和合本) request using the URL template from config.
+			// SourceZHURL contains %d which is replaced with the global chapter index.
 			ctxZH := colly.NewContext()
 			ctxZH.Put("bookID", book.ID.String())
 			ctxZH.Put("bookIndex", strconv.Itoa(book.Index))
 			ctxZH.Put("chapSort", strconv.Itoa(chap))
 			ctxZH.Put("lang", LangChinese)
 			ctxZH.Put("maxVerses", strconv.Itoa(zhVerseCount))
-			urlCUV := fmt.Sprintf(
-				"https://springbible.fhl.net/Bible2/cgic201/read201.cgi?na=0&chap=%d&ft=0",
-				globalChap)
+			urlCUV := fmt.Sprintf(s.Cfg.SourceZHURL, globalChap)
 			if err := c.Request("GET", urlCUV, nil, ctxZH, nil); err != nil {
 				log.Printf("Failed to queue ZH request (book=%d chap=%d): %v",
 					book.Index+1, chap, err)
 			}
 
-			// Queue English (BBE) request.
+			// Queue English (BBE) request using the URL template from config.
+			// SourceENURL contains %d which is replaced with the global chapter index.
 			ctxEN := colly.NewContext()
 			ctxEN.Put("bookID", book.ID.String())
 			ctxEN.Put("bookIndex", strconv.Itoa(book.Index))
 			ctxEN.Put("chapSort", strconv.Itoa(chap))
 			ctxEN.Put("lang", LangEnglish)
 			ctxEN.Put("maxVerses", strconv.Itoa(enVerseCount))
-			urlBBE := fmt.Sprintf(
-				"https://springbible.fhl.net/Bible2/cgic201/read201.cgi?na=0&chap=%d&ver=bbe",
-				globalChap)
+			urlBBE := fmt.Sprintf(s.Cfg.SourceENURL, globalChap)
 			if err := c.Request("GET", urlBBE, nil, ctxEN, nil); err != nil {
 				log.Printf("Failed to queue EN request (book=%d chap=%d): %v",
 					book.Index+1, chap, err)

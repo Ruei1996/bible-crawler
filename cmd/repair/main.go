@@ -21,13 +21,13 @@ import (
 	"io"
 	"log"
 	"net/http"
-	"os"
 	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
 	"time"
 
+	"bible-crawler/internal/config"
 	"bible-crawler/internal/repository"
 	"bible-crawler/internal/spec"
 	"bible-crawler/internal/utils"
@@ -35,11 +35,11 @@ import (
 	"github.com/PuerkitoBio/goquery"
 	"github.com/google/uuid"
 	"github.com/jmoiron/sqlx"
-	"github.com/joho/godotenv"
 	_ "github.com/lib/pq"
 )
 
-var repairHTTPClient = &http.Client{Timeout: 20 * time.Second}
+// repairHTTPClient is set in main() from config so the timeout is configurable.
+var repairHTTPClient *http.Client
 
 // missingEntry identifies one missing chapter-content language pair.
 type missingEntry struct {
@@ -72,11 +72,18 @@ func versePlaceholderContent(lang string) string {
 }
 
 func main() {
-	if err := godotenv.Load(); err != nil {
-		log.Println("No .env file, using environment variables")
+	// Load all settings (source URLs, DB DSN, tuning) from .env / environment.
+	cfg := config.Load()
+
+	// Initialize HTTP client with the configured timeout.
+	repairHTTPClient = &http.Client{
+		Timeout: time.Duration(cfg.HTTPTimeoutSec) * time.Second,
 	}
 
-	db, err := sqlx.Connect("postgres", os.Getenv("DATABASE_URL"))
+	if cfg.DBUrl == "" {
+		log.Fatal("DATABASE_URL is not set — set it in .env or the environment")
+	}
+	db, err := sqlx.Connect("postgres", cfg.DBUrl)
 	if err != nil {
 		log.Fatal("DB connect:", err)
 	}
@@ -183,12 +190,15 @@ func main() {
 
 		globalChap := globalChapStarts[bookIndex] + m.chapSort - 1
 
+		// Build the source URL using the configured URL template.
+		// SourceZHURL and SourceENURL each contain a single %d placeholder
+		// for the global (sequential) chapter index.
 		var pageURL string
 		isChinese := m.lang == "chinese"
 		if isChinese {
-			pageURL = fmt.Sprintf("https://springbible.fhl.net/Bible2/cgic201/read201.cgi?na=0&chap=%d&ft=0", globalChap)
+			pageURL = fmt.Sprintf(cfg.SourceZHURL, globalChap)
 		} else {
-			pageURL = fmt.Sprintf("https://springbible.fhl.net/Bible2/cgic201/read201.cgi?na=0&chap=%d&ver=bbe", globalChap)
+			pageURL = fmt.Sprintf(cfg.SourceENURL, globalChap)
 		}
 
 		log.Printf("Repairing: book_sort=%d chap=%d lang=%s maxVerses=%d  →  %s",

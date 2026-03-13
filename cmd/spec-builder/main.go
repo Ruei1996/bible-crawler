@@ -29,6 +29,7 @@ import (
 	"sync"
 	"time"
 
+	"bible-crawler/internal/config"
 	"bible-crawler/internal/utils"
 
 	"github.com/PuerkitoBio/goquery"
@@ -208,7 +209,13 @@ type enOutputJSON struct {
 
 // ── HTTP fetch ────────────────────────────────────────────────────────────────
 
-var httpClient = &http.Client{Timeout: 30 * time.Second}
+// httpClient and URL templates are set in main() from config so that all three
+// URL/timeout values are driven by .env without touching source code.
+var (
+	httpClient  *http.Client
+	sourceZHURL string // e.g. "https://…?chap=%d&ft=0"
+	sourceENURL string // e.g. "https://…?chap=%d&ver=bbe"
+)
 
 // fetchVerseCount fetches one chapter page and returns the highest verse number
 // found in the <ol><li> elements, which equals the actual verse count for that
@@ -216,13 +223,9 @@ var httpClient = &http.Client{Timeout: 30 * time.Second}
 func fetchVerseCount(globalChap int, isChinese bool) (int, error) {
 	var pageURL string
 	if isChinese {
-		pageURL = fmt.Sprintf(
-			"https://springbible.fhl.net/Bible2/cgic201/read201.cgi?na=0&chap=%d&ft=0",
-			globalChap)
+		pageURL = fmt.Sprintf(sourceZHURL, globalChap)
 	} else {
-		pageURL = fmt.Sprintf(
-			"https://springbible.fhl.net/Bible2/cgic201/read201.cgi?na=0&chap=%d&ver=bbe",
-			globalChap)
+		pageURL = fmt.Sprintf(sourceENURL, globalChap)
 	}
 
 	resp, err := httpClient.Get(pageURL)
@@ -297,6 +300,16 @@ type chapterResult struct {
 // ── Entry point ───────────────────────────────────────────────────────────────
 
 func main() {
+	// Load all settings from .env / environment variables.
+	// This allows changing source URLs, HTTP timeout, and concurrency without
+	// recompiling the binary.
+	cfg := config.Load()
+
+	// Wire package-level http client and URL templates from config.
+	httpClient = &http.Client{Timeout: time.Duration(cfg.HTTPTimeoutSec) * time.Second}
+	sourceZHURL = cfg.SourceZHURL
+	sourceENURL = cfg.SourceENURL
+
 	_, thisFile, _, _ := runtime.Caller(0)
 	projectRoot := filepath.Join(filepath.Dir(thisFile), "..", "..")
 	zhPath := filepath.Join(projectRoot, "bible_books_zh.json")
@@ -310,9 +323,8 @@ func main() {
 	log.Printf("Spec-builder starting: %d HTTP requests (1189 chapters × 2 languages).", totalRequests)
 	log.Println("This will take several minutes. Please wait…")
 
-	// Semaphore limits concurrent outbound connections to stay polite.
-	const maxConcurrent = 5
-	sem := make(chan struct{}, maxConcurrent)
+	// Semaphore limits concurrent outbound connections; value from config.
+	sem := make(chan struct{}, cfg.CrawlerParallelism)
 	results := make(chan chapterResult, totalRequests)
 
 	var wg sync.WaitGroup
@@ -330,8 +342,8 @@ func main() {
 					defer wg.Done()
 					sem <- struct{}{}
 					defer func() { <-sem }()
-					// Small delay per request to avoid overwhelming the server.
-					time.Sleep(50 * time.Millisecond)
+					// Per-request courtesy delay from config (prevents rate-limit rejections).
+					time.Sleep(time.Duration(cfg.CrawlerDelayMS) * time.Millisecond)
 					count, err := fetchVerseCount(globalChap, isChinese)
 					results <- chapterResult{
 						bookIdx:   bookIdx,

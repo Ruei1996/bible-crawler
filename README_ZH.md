@@ -12,7 +12,7 @@
 - **版本節數差異處理（Versification-Aware）**：和合本與 BBE 在部分書卷（例如利未記、撒迦利亞書）的章節邊界不同。Spec 檔案記錄各語言的正確節數；修復工具（repair）對「一個語言有、另一個沒有」的節位自動寫入可讀的佔位說明文字。
 - **冪等寫入（Idempotent）**：所有 DB 寫入使用 `SELECT → INSERT → SELECT` 三步驟模式（對併發 goroutine 安全無 race condition）。重複執行爬蟲不會產生重複資料。
 - **編碼處理**：自動將中文頁面的 **Big5** 編碼轉換為 UTF-8 後再解析。
-- **速率限制**：5 個並行請求，每次 200ms 加隨機 jitter 延遲，禮貌對待來源伺服器。
+- **完全可配置**：來源 URL、並行數、延遲與 HTTP 逾時皆透過 `.env` 設定，網站更新時無需重新編譯。
 - **修復工具（Repair Tool）**：主爬蟲完成後，執行 `cmd/repair` 補齊任何因暫時性 HTTP 錯誤而遺漏的章節與經文。
 
 ## 🛠 前置需求
@@ -53,12 +53,29 @@ go mod tidy
 
 ### 步驟 3：設定環境變數
 
-將 `.env.example` 複製為 `.env`，填入實際連線資訊：
+將 `.env.example` 複製為 `.env`，填入實際連線資訊與設定：
 
 ```ini
+# ── 資料庫 ────────────────────────────────────────────────────────────────────
 APP_ENV=development
 DATABASE_URL=postgres://username:password@localhost:5432/topchurch_dev?sslmode=disable
+
+# ── 來源網站 ──────────────────────────────────────────────────────────────────
+# 若網站搬遷或更換聖經翻譯版本，更新以下三個值即可，無需重新編譯程式碼。
+# SOURCE_ZH_URL 與 SOURCE_EN_URL 各需包含一個 %d 佔位符，代表全域章節索引。
+SOURCE_DOMAIN=springbible.fhl.net
+SOURCE_ZH_URL=https://springbible.fhl.net/Bible2/cgic201/read201.cgi?na=0&chap=%d&ft=0
+SOURCE_EN_URL=https://springbible.fhl.net/Bible2/cgic201/read201.cgi?na=0&chap=%d&ver=bbe
+
+# ── 爬蟲調校 ──────────────────────────────────────────────────────────────────
+# 如遭伺服器限速，可降低 CRAWLER_PARALLELISM 或提高延遲值。
+CRAWLER_PARALLELISM=5
+CRAWLER_DELAY_MS=200
+CRAWLER_RANDOM_DELAY_MS=100
+HTTP_TIMEOUT_SEC=30
 ```
+
+> **提示 — 更換來源網站**：若 `springbible.fhl.net` 搬遷，或需改用其他中文/英文聖經翻譯，只需在 `.env` 更新 `SOURCE_DOMAIN`、`SOURCE_ZH_URL`、`SOURCE_EN_URL`，然後重新執行 `cmd/spec-builder` 重新產生規格 JSON，再執行主爬蟲即可。
 
 ### 步驟 4：建置 Spec 規格檔（首次或需更新時執行）
 
@@ -116,7 +133,7 @@ No missing chapters found — nothing to repair.
 
 ### 步驟 7：驗證資料（選擇性）
 
-對資料庫執行專案文件中的驗證 SQL 查詢。三個層級（書、章、節）皆應返回 **0 筆**結果。
+對資料庫執行專案根目錄的 `validation.sql`。查詢涵蓋三個層級（書、章、節）。第 1–3 節（缺漏偵測）應返回 **0 筆**結果；第 5 節（版本差異稽核）會列出預期的版本差異章節，這是正常現象。
 
 ## 📂 專案結構說明
 
@@ -130,7 +147,7 @@ bible-crawler/
 │   └── repair/
 │       └── main.go           # 補齊遺漏章節/經文
 ├── internal/
-│   ├── config/               # 環境變數載入
+│   ├── config/               # 環境變數載入（所有 .env 欄位）
 │   ├── database/             # PostgreSQL 連線設定
 │   ├── model/                # 對應資料庫的 Go Struct
 │   ├── repository/           # 冪等資料存取層（所有 SQL）
@@ -139,11 +156,14 @@ bible-crawler/
 │   └── utils/                # Big5→UTF-8 解碼、文字清理
 ├── bible_books_zh.json       # 和合本各章節數（由 spec-builder 自動產生）
 ├── bible_books_en.json       # BBE 各章節數（由 spec-builder 自動產生）
-├── .env                      # 本機 DB 連線設定（不納入版控）
-├── .env.example              # .env 範本
+├── validation.sql            # PostgreSQL 驗證查詢 + 雙語章節內容查詢
+├── .env                      # 本機 DB 連線設定與調校（不納入版控）
+├── .env.example              # .env 範本（所有欄位均有說明）
 ├── go.mod
 └── README_ZH.md
 ```
+
+> **注意**：已編譯的執行檔（`spec-builder`、`crawler`、`repair`）已列入 `.gitignore`，請勿提交至版本控制。請一律使用 `go run cmd/<name>/main.go` 執行。
 
 ## ⚠️ 常見問題排除
 

@@ -321,6 +321,8 @@ target_book AS (
     LIMIT  1
 )
 SELECT
+    p.book_name_param,
+    p.chapter_num_param,
     bs.sort                                                         AS verse_num,
     bsc.language,
     bsc.title,
