@@ -1,3 +1,16 @@
+// Package repository provides idempotent read/write operations for the bibles
+// PostgreSQL schema. All write methods follow the same equality-aware pattern:
+//
+//  1. SELECT — return immediately if the row already exists with matching data.
+//  2. INSERT (or INSERT … ON CONFLICT DO NOTHING) — write the new row.
+//  3. SELECT fallback — picks up a row committed by a concurrent goroutine
+//     when step 2 returns ErrNoRows (CTE snapshot race-condition safety).
+//
+// Structural tables (bible_books, bible_chapters, bible_sections) use the
+// three-step SELECT→INSERT→SELECT pattern because they have unique constraints.
+// Content tables (bible_book_contents, bible_chapter_contents,
+// bible_section_contents) use a Go-level SELECT→INSERT/UPDATE because they
+// have no unique constraint (only a btree index), so ON CONFLICT is invalid.
 package repository
 
 import (

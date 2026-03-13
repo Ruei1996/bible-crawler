@@ -1,3 +1,5 @@
+// Package model defines the Go struct types that map to the bibles schema tables.
+// Tags use the sqlx `db:` convention so sqlx.StructScan and NamedExec work directly.
 package model
 
 import "github.com/google/uuid"

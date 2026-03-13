@@ -1,121 +1,166 @@
-# Bible Crawler (聖經爬蟲系統)
+# Bible Crawler（聖經爬蟲系統）
 
-這是一個高效能、支援併發的 Go 語言網頁爬蟲。專門用於從 `springbible.fhl.net` 抓取聖經資料（和合本中文版與 Basic English Version），並將其儲存到結構嚴謹的 PostgreSQL 資料庫中。
+這是一個高效能、支援併發的 Go 語言網頁爬蟲。專門從 `springbible.fhl.net` 抓取聖經資料（和合本中文版與 Basic English Version BBE），並儲存到結構嚴謹的 PostgreSQL 資料庫中。
 
 ## 🌟 功能特色
 
-- **兩階段爬取 (Two-Phase Crawling)**：
-  - **第一階段**：同步探索並建立 66 卷書的元數據，確保資料結構完整性。
-  - **第二階段**：非同步（Async）併發爬取所有章節與經文，極大化效能。
-- **強大的編碼支援**：自動處理來源網站的 **Big5** 編碼，並轉換為 UTF-8 儲存。
-- **冪等性設計 (Idempotency)**：程式可重複執行。寫入規則為「不存在就插入、完全一致不動作、資料不同才更新」，避免重複資料與不必要寫入。
-- **速率限制 (Rate Limiting)**：內建保護機制（每秒 2 次請求），尊重目標伺服器負載並避免 IP 被封鎖。
-- **清晰架構**：符合 SOLID 原則，分為 Scraper (爬蟲)、Repository (資料存取)、Model (模型) 層。
+- **Spec 驅動爬取**：各章節的實際節數從 `bible_books_zh.json`（和合本）與 `bible_books_en.json`（BBE）讀取，程式碼零硬寫數字，完全由 JSON 規格控制。
+- **三階段工作流程**：
+  - **Stage 0 — Spec Builder**：爬取每個章節（兩語言），發現實際節數，寫入兩份 JSON 規格檔。首次建置或需更新規格時執行。
+  - **Stage 1 — 書本設定**：直接從 JSON 規格寫入 66 卷書的中英文書名（不需 HTTP 請求）。
+  - **Stage 2 — 章節與經文爬取**：非同步併發爬取 1,189 個章節 × 2 語言，依各語言的規格節數上限存入資料庫。
+- **版本節數差異處理（Versification-Aware）**：和合本與 BBE 在部分書卷（例如利未記、撒迦利亞書）的章節邊界不同。Spec 檔案記錄各語言的正確節數；修復工具（repair）對「一個語言有、另一個沒有」的節位自動寫入可讀的佔位說明文字。
+- **冪等寫入（Idempotent）**：所有 DB 寫入使用 `SELECT → INSERT → SELECT` 三步驟模式（對併發 goroutine 安全無 race condition）。重複執行爬蟲不會產生重複資料。
+- **編碼處理**：自動將中文頁面的 **Big5** 編碼轉換為 UTF-8 後再解析。
+- **速率限制**：5 個並行請求，每次 200ms 加隨機 jitter 延遲，禮貌對待來源伺服器。
+- **修復工具（Repair Tool）**：主爬蟲完成後，執行 `cmd/repair` 補齊任何因暫時性 HTTP 錯誤而遺漏的章節與經文。
 
 ## 🛠 前置需求
 
-在開始之前，請確保您已安裝以下工具：
-
-- **Go** (版本 1.21 或更高)
-- **PostgreSQL** (版本 13 或更高)
+- **Go** 1.21 或更高版本
+- **PostgreSQL** 13 或更高版本
 - **Git**
 
-## 🚀 標準作業程序 (SOP)
+## 📐 資料庫 Schema
 
-請依照以下步驟設定並執行爬蟲。
+爬蟲寫入 `bibles` schema，共六張資料表，分為結構層與內容層：
 
-### 步驟 1：取得專案程式碼
+| 資料表 | 用途 |
+|--------|------|
+| `bibles.bible_books` | 每卷書一列（sort 1–66） |
+| `bibles.bible_book_contents` | 書名本地化（chinese / english） |
+| `bibles.bible_chapters` | 每章一列（隸屬於書） |
+| `bibles.bible_chapter_contents` | 章名本地化 |
+| `bibles.bible_sections` | 每節一列（隸屬於章） |
+| `bibles.bible_section_contents` | 節的本地化標題與內文 |
+
+第一次執行前，請先用專案文件或 `db/schema.sql` 中的 DDL 建立 Schema。
+
+## 🚀 標準作業程序（SOP）
+
+### 步驟 1：取得程式碼並安裝相依套件
 
 ```bash
 git clone https://github.com/your-username/bible-crawler.git
 cd bible-crawler
+go mod tidy
 ```
 
 ### 步驟 2：資料庫初始化
 
-在執行爬蟲之前，必須先建立資料庫 Schema。
-
-1.  登入您的 PostgreSQL 資料庫。
-2.  建立一個新的資料庫（例如：`topchurch_dev`）。
-3.  執行 DDL SQL 腳本以建立資料表。
-    *(注意：請使用專案文件中提供的 Schema SQL，需包含 `bibles` schema 以及 `bible_books`, `bible_chapters` 等資料表。)*
+1. 登入 PostgreSQL，建立資料庫（例如 `topchurch_dev`）。
+2. 執行 DDL 腳本建立 `bibles` schema 及六張資料表。
 
 ### 步驟 3：設定環境變數
 
-在專案根目錄下建立一個 `.env` 檔案，用於設定資料庫連線資訊。
-
-1.  複製範例設定或直接建立新檔案 `.env`。
-2.  加入以下內容：
+將 `.env.example` 複製為 `.env`，填入實際連線資訊：
 
 ```ini
-# .env file
 APP_ENV=development
 DATABASE_URL=postgres://username:password@localhost:5432/topchurch_dev?sslmode=disable
 ```
 
-*請將 `username`, `password`, `localhost`, `topchurch_dev` 替換為您實際的 PostgreSQL 帳號密碼與資料庫名稱。*
+### 步驟 4：建置 Spec 規格檔（首次或需更新時執行）
 
-### 步驟 4：安裝相依套件
-
-下載並整理所需的 Go 模組：
+此步驟爬取全部章節頁面（約 2,378 個請求），取得每語言的實際節數，並寫入兩份 JSON 規格檔。**全新建置時必須先執行此步驟。**
 
 ```bash
-go mod tidy
+go run cmd/spec-builder/main.go
 ```
 
-### 步驟 5：執行爬蟲
+預計時間：**5–10 分鐘**（5 個並行 worker）。
 
-執行主程式：
+預期輸出：
+```text
+Spec-builder starting: 2378 HTTP requests (1189 chapters × 2 languages).
+Progress: 200/2378 requests done (0 errors)
+...
+Writing ZH (和合本): total_verses=31102 (OT=23145 NT=7957)
+Writing EN (BBE): total_verses=31173 (OT=23214 NT=7959)
+Done. Written:
+  /path/to/bible_books_zh.json
+  /path/to/bible_books_en.json
+```
+
+> 執行完成後，`bible_books_zh.json` 與 `bible_books_en.json` 在部分書卷的章節節數將**不同**，正確反映兩個翻譯版本的版本差異。
+
+### 步驟 5：執行主爬蟲
 
 ```bash
 go run cmd/crawler/main.go
 ```
 
-**預期輸出結果：**
-
+預期輸出：
 ```text
-2024/03/11 10:00:00 Starting Bible Crawler...
-2024/03/11 10:00:00 Connected to database successfully
-2024/03/11 10:00:00 Phase 1: Discovering Books...
-...
-2024/03/11 10:00:05 Discovered 66 books.
-2024/03/11 10:00:05 Phase 2: Crawling Chapters...
-...
-2024/03/11 10:05:00 Bible Crawler finished successfully.
+Connected to database successfully
+Starting Bible Crawler...
+Phase 1: Setting up Books from spec...
+Phase 1 complete: 66 books ready.
+Phase 2: Crawling Chapters...
+Phase 2 complete.
+Bible Crawler finished successfully.
 ```
+
+### 步驟 6：執行修復工具（選擇性）
+
+如果因暫時性網路錯誤導致部分章節或經文遺漏，執行修復工具。它會查詢 DB 找出缺漏項目，只補抓那些頁面，並對版本差異節位寫入佔位說明文字。
+
+```bash
+go run cmd/repair/main.go
+```
+
+資料完整時的預期輸出：
+```text
+No missing chapters found — nothing to repair.
+```
+
+### 步驟 7：驗證資料（選擇性）
+
+對資料庫執行專案文件中的驗證 SQL 查詢。三個層級（書、章、節）皆應返回 **0 筆**結果。
 
 ## 📂 專案結構說明
 
 ```text
 bible-crawler/
 ├── cmd/
-│   └── crawler/
-│       └── main.go           # 程式進入點 (Entry Point)
+│   ├── crawler/
+│   │   └── main.go           # 主爬蟲進入點（Stage 1 + 2）
+│   ├── spec-builder/
+│   │   └── main.go           # Stage 0：發現節數，寫入 JSON 規格檔
+│   └── repair/
+│       └── main.go           # 補齊遺漏章節/經文
 ├── internal/
-│   ├── config/               # 環境變數載入與設定
-│   ├── database/             # 資料庫連線邏輯
-│   ├── model/                # 對應資料庫的 Go Struct 定義
-│   ├── repository/           # 資料存取層 (SQL 查詢與寫入)
-│   ├── scraper/              # 爬蟲核心邏輯 (Colly + GoQuery)
-│   └── utils/                # 工具函式 (如：Big5 編碼轉換)
-├── .env                      # 資料庫設定檔 (需自行建立)
-├── go.mod                    # Go 模組定義檔
-└── README_ZH.md              # 專案說明文件 (中文)
+│   ├── config/               # 環境變數載入
+│   ├── database/             # PostgreSQL 連線設定
+│   ├── model/                # 對應資料庫的 Go Struct
+│   ├── repository/           # 冪等資料存取層（所有 SQL）
+│   ├── scraper/              # Colly 爬蟲核心邏輯
+│   ├── spec/                 # JSON 規格檔載入（BibleSpec, BookSpec）
+│   └── utils/                # Big5→UTF-8 解碼、文字清理
+├── bible_books_zh.json       # 和合本各章節數（由 spec-builder 自動產生）
+├── bible_books_en.json       # BBE 各章節數（由 spec-builder 自動產生）
+├── .env                      # 本機 DB 連線設定（不納入版控）
+├── .env.example              # .env 範本
+├── go.mod
+└── README_ZH.md
 ```
 
-## ⚠️ 常見問題排除 (Troubleshooting)
+## ⚠️ 常見問題排除
 
-**Q: 出現 "pq: password authentication failed for user..." 錯誤**
-A: 請檢查 `.env` 檔案中的 `DATABASE_URL`，確認使用者名稱與密碼是否正確。
+**Q：出現 "pq: password authentication failed for user..." 錯誤**  
+A：請檢查 `.env` 中的 `DATABASE_URL`，確認帳號密碼正確。
 
-**Q: 出現 "dial tcp [::1]:5432: connect: connection refused" 錯誤**
-A: 請確認您的 PostgreSQL 服務已啟動，且正在監聽 5432 連接埠。
+**Q：出現 "dial tcp [::1]:5432: connect: connection refused" 錯誤**  
+A：請確認 PostgreSQL 服務已啟動並監聽 5432 連接埠。
 
-**Q: 爬蟲卡住或停止回應**
-A: 目標網站可能對您進行了暫時的速率限制。爬蟲預設設定為每請求間隔 0.5 秒。如果問題持續，請檢查網路連線。
+**Q：驗證 SQL 仍有缺漏資料**  
+A：修復工具已自動寫入版本差異佔位文字。若仍有缺漏，重新執行 `cmd/repair` 即可（完全冪等）。
 
-**Q: 資料出現亂碼 (Mojibake)**
-A: 本爬蟲內建 `Big5ToUTF8` 轉換工具。請確保您沒有修改 `internal/utils/encoding.go` 中的編碼處理邏輯。
+**Q：資料出現亂碼（Mojibake）**  
+A：爬蟲已內建 Big5 轉 UTF-8 處理。請勿修改 `internal/utils/encoding.go` 的編碼邏輯。
+
+**Q：`bible_books_zh.json` 與 `bible_books_en.json` 節數完全相同**  
+A：請重新執行 `cmd/spec-builder/main.go`。規格檔必須從網站即時抓取才能正確反映兩語言的版本差異。
 
 ## 📜 授權
 

@@ -1,3 +1,5 @@
+// Package database provides a helper to open and validate the PostgreSQL
+// connection required by all three crawler commands.
 package database
 
 import (

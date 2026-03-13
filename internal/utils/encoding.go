@@ -1,3 +1,4 @@
+// Package utils provides small, stateless helpers shared across all commands.
 package utils
 
 import (

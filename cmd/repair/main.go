@@ -1,5 +1,19 @@
-// cmd/repair/main.go re-fetches chapters whose content is missing for one language.
-// Run after the main crawler to patch any HTTP failures from the initial run.
+// cmd/repair/main.go re-fetches chapters whose content is missing for one or
+// both languages. Run it after the main crawler to patch any entries that were
+// skipped due to transient HTTP errors.
+//
+// It is also safe to run on a database that is already complete — it will find
+// nothing to do and exit immediately ("nothing to repair").
+//
+// Usage:
+//
+//	go run cmd/repair/main.go
+//
+// The repair tool loads the same JSON spec files as the crawler so that it
+// applies the same per-language verse-count bounds. After re-fetching a chapter
+// page it writes versification-difference placeholder rows for any verse positions
+// that exist in one translation's DB sections but are absent from the other
+// translation's source page (e.g. Hebrew Lev 5:20-26 = Chinese CUV Lev 6:1-7).
 package main
 
 import (
@@ -8,11 +22,14 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
 
 	"bible-crawler/internal/repository"
+	"bible-crawler/internal/spec"
 	"bible-crawler/internal/utils"
 
 	"github.com/PuerkitoBio/goquery"
@@ -21,26 +38,6 @@ import (
 	"github.com/joho/godotenv"
 	_ "github.com/lib/pq"
 )
-
-var bibleChapterCounts = [66]int{
-	50, 40, 27, 36, 34, 24, 21, 4, 31, 24,
-	22, 25, 29, 36, 10, 13, 10, 42, 150, 31,
-	12, 8, 66, 52, 5, 48, 12, 14, 3, 9,
-	1, 4, 7, 3, 3, 3, 2, 14, 4,
-	28, 16, 24, 21, 28, 16, 16, 13, 6, 6,
-	4, 4, 5, 3, 6, 4, 3, 1, 13, 5,
-	5, 3, 5, 1, 1, 1, 22,
-}
-
-var globalChapStarts [66]int
-
-func init() {
-	offset := 1
-	for i := 0; i < 66; i++ {
-		globalChapStarts[i] = offset
-		offset += bibleChapterCounts[i]
-	}
-}
 
 var repairHTTPClient = &http.Client{Timeout: 20 * time.Second}
 
@@ -86,6 +83,18 @@ func main() {
 	defer db.Close()
 
 	repo := repository.NewBibleRepository(db)
+
+	// Load Bible spec JSON files (same paths as the crawler uses).
+	_, thisFile, _, _ := runtime.Caller(0)
+	projectRoot := filepath.Join(filepath.Dir(thisFile), "..", "..")
+	bibleSpec, err := spec.Load(
+		filepath.Join(projectRoot, "bible_books_zh.json"),
+		filepath.Join(projectRoot, "bible_books_en.json"),
+	)
+	if err != nil {
+		log.Fatalf("Failed to load Bible spec: %v", err)
+	}
+	globalChapStarts := bibleSpec.GlobalChapStarts()
 
 	// Find all chapter-language pairs that need repair:
 	//   (a) missing bible_chapter_contents row, OR
@@ -153,14 +162,25 @@ func main() {
 
 	for _, m := range missing {
 		bookIndex := m.bookSort - 1
-		if bookIndex < 0 || bookIndex >= len(globalChapStarts) {
+		if bookIndex < 0 || bookIndex >= 66 {
 			log.Printf("  ERROR invalid book_sort=%d for chapter id %s", m.bookSort, m.chapID)
 			continue
 		}
-		if m.chapSort <= 0 || m.chapSort > bibleChapterCounts[bookIndex] {
+		bookSpec := bibleSpec.ZH[bookIndex]
+		if m.lang == "english" {
+			bookSpec = bibleSpec.EN[bookIndex]
+		}
+		if m.chapSort <= 0 || m.chapSort > bookSpec.TotalChapters {
 			log.Printf("  ERROR invalid chapter sort=%d for book_sort=%d", m.chapSort, m.bookSort)
 			continue
 		}
+		// maxVerses is the spec-defined verse count for this language/book/chapter.
+		maxVerses, err := bookSpec.VerseCount(m.chapSort)
+		if err != nil {
+			log.Printf("  ERROR spec VerseCount book=%d chap=%d: %v", m.bookSort, m.chapSort, err)
+			continue
+		}
+
 		globalChap := globalChapStarts[bookIndex] + m.chapSort - 1
 
 		var pageURL string
@@ -171,7 +191,8 @@ func main() {
 			pageURL = fmt.Sprintf("https://springbible.fhl.net/Bible2/cgic201/read201.cgi?na=0&chap=%d&ver=bbe", globalChap)
 		}
 
-		log.Printf("Repairing: book_sort=%d chap=%d lang=%s  →  %s", m.bookSort, m.chapSort, m.lang, pageURL)
+		log.Printf("Repairing: book_sort=%d chap=%d lang=%s maxVerses=%d  →  %s",
+			m.bookSort, m.chapSort, m.lang, maxVerses, pageURL)
 
 		body, err := fetchPage(pageURL, isChinese)
 		if err != nil {
@@ -188,7 +209,7 @@ func main() {
 			log.Printf("  ERROR saving chapter_content: %v", err)
 		}
 
-		// Parse and save verses.
+		// Parse and save verses. Only accept verse numbers within spec bounds.
 		doc, err := goquery.NewDocumentFromReader(strings.NewReader(body))
 		if err != nil {
 			log.Printf("  ERROR parsing HTML: %v", err)
@@ -206,6 +227,12 @@ func main() {
 			}
 			if verseNum <= 0 {
 				verseNum = i + 1
+			}
+			// Spec guard: skip verses beyond what the JSON spec defines.
+			if verseNum > maxVerses {
+				log.Printf("  SKIP verse=%d exceeds spec max=%d (book=%d chap=%d lang=%s)",
+					verseNum, maxVerses, m.bookSort, m.chapSort, m.lang)
+				return
 			}
 			content := utils.CleanText(sel.Text())
 			if content == "" {
@@ -284,7 +311,8 @@ func main() {
 	log.Println("Repair complete.")
 }
 
-// fetchPage reads one chapter page and decodes Big5 payload when needed.
+// fetchPage downloads a chapter page and returns its decoded UTF-8 body.
+// Chinese pages from springbible.fhl.net are Big5-encoded; English pages are ASCII.
 func fetchPage(url string, isChinese bool) (string, error) {
 	resp, err := repairHTTPClient.Get(url)
 	if err != nil {

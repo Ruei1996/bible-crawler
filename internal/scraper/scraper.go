@@ -1,9 +1,17 @@
+// Package scraper implements the two-phase Bible crawl using Colly.
+//
+// Phase 1 — setupBooks: writes all 66 book rows and localized titles to the DB
+// directly from the JSON spec (no HTTP requests).
+//
+// Phase 2 — crawlChapters: concurrently fetches every chapter page in both
+// Chinese (和合本) and English (BBE) and persists each verse. Verse counts are
+// bounded by the per-language spec to handle versification differences
+// (cases where CUV and BBE draw chapter boundaries differently).
 package scraper
 
 import (
 	"fmt"
 	"log"
-	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -11,6 +19,7 @@ import (
 	"time"
 
 	"bible-crawler/internal/repository"
+	"bible-crawler/internal/spec"
 	"bible-crawler/internal/utils"
 
 	"github.com/PuerkitoBio/goquery"
@@ -19,61 +28,39 @@ import (
 )
 
 const (
-	// LangChinese is the language key used in DB rows and crawler context.
+	// LangChinese is the language key used in DB rows and Colly context.
 	LangChinese = "chinese"
-	// LangEnglish is the language key used in DB rows and crawler context.
+	// LangEnglish is the language key used in DB rows and Colly context.
 	LangEnglish = "english"
 )
 
-// bibleChapterCounts is the definitive chapter count per book (index 0=Genesis … 65=Revelation).
-// Sourced from the site's read100.html JavaScript: var cnum = new Array(...)
-var bibleChapterCounts = [66]int{
-	50, 40, 27, 36, 34, 24, 21, 4, 31, 24, // 0–9:  Gen–2Sam
-	22, 25, 29, 36, 10, 13, 10, 42, 150, 31, // 10–19: 1Kgs–Prov
-	12, 8, 66, 52, 5, 48, 12, 14, 3, 9, // 20–29: Eccl–Amos
-	1, 4, 7, 3, 3, 3, 2, 14, 4, // 30–38: Oba–Mal
-	28, 16, 24, 21, 28, 16, 16, 13, 6, 6, // 39–48: Matt–Eph
-	4, 4, 5, 3, 6, 4, 3, 1, 13, 5, // 49–58: Phil–Jas
-	5, 3, 5, 1, 1, 1, 22, // 59–65: 1Pet–Rev
-}
-
-// globalChapStarts[i] is the 1-based global chapter index for book i's first chapter.
-// Genesis (0)=1, Exodus (1)=51, …, Revelation (65)=1168.
-var globalChapStarts [66]int
-
-func init() {
-	offset := 1
-	for i := 0; i < 66; i++ {
-		globalChapStarts[i] = offset
-		offset += bibleChapterCounts[i]
-	}
-}
-
+// BibleScraper holds the repository, Colly collector, and Bible spec.
+// All crawl parameters are driven by the spec; nothing is hard-coded.
 type BibleScraper struct {
-	Repo *repository.BibleRepository
-	C    *colly.Collector
+	Repo             *repository.BibleRepository
+	C                *colly.Collector
+	Spec             *spec.BibleSpec
+	globalChapStarts [66]int
 }
 
-// BookMeta keeps minimal per-book data needed for later chapter crawling.
+// BookMeta keeps the minimal per-book data needed for phase 2.
 type BookMeta struct {
 	ID    uuid.UUID
-	Index int
-	Name  string
+	Index int // 0-based index into spec slices
 }
 
-// NewBibleScraper initializes a Colly collector with domain restriction and
-// polite rate limiting so repeated runs remain stable against the source site.
-func NewBibleScraper(repo *repository.BibleRepository) *BibleScraper {
+// NewBibleScraper initializes a Colly collector and attaches the Bible spec.
+// bibleSpec must have been loaded from the JSON files before calling this.
+func NewBibleScraper(repo *repository.BibleRepository, bibleSpec *spec.BibleSpec) *BibleScraper {
 	c := colly.NewCollector(
 		colly.AllowedDomains("springbible.fhl.net"),
 		colly.UserAgent("Mozilla/5.0 (compatible; BibleCrawler/1.0; +http://yourdomain.com)"),
 		colly.Async(true),
-		// Allow revisiting URLs so chapter 1 (fetched in discoverBooks) is
-		// also processed in crawlChapters.
+		// Allow revisiting so chapter 1 pages are also processed in phase 2.
 		colly.AllowURLRevisit(),
 	)
 
-	// Moderate rate limiting: 5 parallel requests, 200ms fixed + 100ms random delay.
+	// Moderate rate limiting: 5 parallel requests, 200ms + 0–100ms jitter.
 	c.Limit(&colly.LimitRule{
 		DomainGlob:  "*springbible.fhl.net*",
 		Parallelism: 5,
@@ -82,174 +69,83 @@ func NewBibleScraper(repo *repository.BibleRepository) *BibleScraper {
 	})
 
 	return &BibleScraper{
-		Repo: repo,
-		C:    c,
+		Repo:             repo,
+		C:                c,
+		Spec:             bibleSpec,
+		globalChapStarts: bibleSpec.GlobalChapStarts(),
 	}
 }
 
 // Run executes the two crawler phases.
-// It returns an error when phase 1 cannot discover the expected book count,
-// because phase 2 would otherwise produce incomplete data silently.
+// Phase 1 writes book metadata from the JSON spec (no HTTP requests needed).
+// Phase 2 crawls every chapter page in both languages and persists verses.
 func (s *BibleScraper) Run() error {
 	log.Println("Starting Bible Scraper...")
-	books := s.discoverBooks()
-	if len(books) != len(bibleChapterCounts) {
-		return fmt.Errorf(
-			"phase 1 incomplete: discovered %d/%d books; aborting chapter crawl",
-			len(books),
-			len(bibleChapterCounts),
-		)
+	books, err := s.setupBooks()
+	if err != nil {
+		return fmt.Errorf("phase 1 failed: %w", err)
 	}
 	s.crawlChapters(books)
 	return nil
 }
 
-// discoverBooks crawls all 66 book titles first and ensures each book row exists.
-// This phase is intentionally separated so phase 2 can focus on chapter/verse data.
-func (s *BibleScraper) discoverBooks() []BookMeta {
-	log.Println("Phase 1: Discovering Books...")
+// setupBooks uses the JSON spec to ensure all 66 book rows exist in the DB
+// and that both Chinese and English book titles are written.
+// No HTTP requests are made in this phase — titles come directly from the spec.
+func (s *BibleScraper) setupBooks() ([]BookMeta, error) {
+	log.Println("Phase 1: Setting up Books from spec...")
+
 	var books []BookMeta
 	var mu sync.Mutex
 	var wg sync.WaitGroup
 
 	for i := 0; i < 66; i++ {
 		wg.Add(1)
-		go func(index int) {
+		go func(idx int) {
 			defer wg.Done()
-			meta, err := s.fetchBookMeta(index)
+
+			bookID, err := s.Repo.GetOrCreateBook(idx + 1)
 			if err != nil {
-				log.Printf("Failed to fetch metadata for book index %d: %v", index, err)
+				log.Printf("Phase 1: failed to get/create book %d: %v", idx+1, err)
 				return
 			}
+
+			zhTitle := s.Spec.ZH[idx].NameZH
+			enTitle := s.Spec.EN[idx].NameEN
+
+			if err = s.Repo.UpsertBookContent(bookID, LangChinese, zhTitle); err != nil {
+				log.Printf("Phase 1: failed to write ZH title for book %d: %v", idx+1, err)
+			}
+			if err = s.Repo.UpsertBookContent(bookID, LangEnglish, enTitle); err != nil {
+				log.Printf("Phase 1: failed to write EN title for book %d: %v", idx+1, err)
+			}
+
 			mu.Lock()
-			books = append(books, meta)
+			books = append(books, BookMeta{ID: bookID, Index: idx})
 			mu.Unlock()
 		}(i)
 	}
 
 	wg.Wait()
-	sort.Slice(books, func(i, j int) bool {
-		return books[i].Index < books[j].Index
-	})
+	sort.Slice(books, func(i, j int) bool { return books[i].Index < books[j].Index })
 
-	if len(books) != len(bibleChapterCounts) {
-		log.Printf("Warning: discovered %d books, expected %d", len(books), len(bibleChapterCounts))
+	if len(books) != 66 {
+		return nil, fmt.Errorf("only %d/66 books set up; aborting chapter crawl", len(books))
 	}
-	log.Printf("Discovered %d books.", len(books))
-	return books
+	log.Printf("Phase 1 complete: %d books ready.", len(books))
+	return books, nil
 }
 
-// fetchBookMeta resolves one Chinese title page and persists both Chinese/English
-// metadata for that book.
-func (s *BibleScraper) fetchBookMeta(bookIndex int) (BookMeta, error) {
-	c := s.C.Clone()
-	c.Async = false
-
-	url := fmt.Sprintf("https://springbible.fhl.net/Bible2/cgic201/read201.cgi?na=0&chap=%d&ft=0", globalChapStarts[bookIndex])
-
-	var meta BookMeta
-	var errFetch error
-
-	c.OnResponse(func(r *colly.Response) {
-		body, err := utils.Big5ToUTF8(r.Body)
-		if err != nil {
-			errFetch = err
-			return
-		}
-
-		doc, err := goquery.NewDocumentFromReader(strings.NewReader(body))
-		if err != nil {
-			errFetch = err
-			return
-		}
-
-		bookTitle := fmt.Sprintf("Book_%d", bookIndex+1)
-		doc.Find("font").Each(func(i int, sel *goquery.Selection) {
-			text := strings.TrimSpace(sel.Text())
-			if idx := strings.Index(text, " 第"); idx > 0 {
-				bookTitle = strings.TrimSpace(text[:idx])
-			}
-		})
-
-		bookID, err := s.Repo.GetOrCreateBook(bookIndex + 1)
-		if err != nil {
-			errFetch = err
-			return
-		}
-
-		if err = s.Repo.UpsertBookContent(bookID, LangChinese, bookTitle); err != nil {
-			errFetch = err
-			return
-		}
-
-		if err = s.fetchEnglishTitle(bookIndex, bookID); err != nil {
-			errFetch = err
-			return
-		}
-
-		meta = BookMeta{
-			ID:    bookID,
-			Index: bookIndex,
-			Name:  bookTitle,
-		}
-	})
-
-	if err := c.Visit(url); err != nil {
-		return BookMeta{}, err
-	}
-	if errFetch != nil {
-		return BookMeta{}, errFetch
-	}
-	return meta, nil
-}
-
-// fetchEnglishTitle resolves and persists the English book title.
-func (s *BibleScraper) fetchEnglishTitle(bookIndex int, bookID uuid.UUID) error {
-	c := s.C.Clone()
-	c.Async = false
-	url := fmt.Sprintf("https://springbible.fhl.net/Bible2/cgic201/read201.cgi?na=0&chap=%d&ver=bbe", globalChapStarts[bookIndex])
-	var errFetch error
-
-	c.OnResponse(func(r *colly.Response) {
-		doc, err := goquery.NewDocumentFromReader(strings.NewReader(string(r.Body)))
-		if err != nil {
-			errFetch = fmt.Errorf("failed to parse english title page for book index %d: %w", bookIndex, err)
-			return
-		}
-
-		// The English page font tag contains "BookName chapter N" (lowercase "chapter").
-		reTitle := regexp.MustCompile(`(?i)(.*?)\s+chapter\s+\d+`)
-		doc.Find("font").Each(func(i int, sel *goquery.Selection) {
-			text := strings.TrimSpace(sel.Text())
-			match := reTitle.FindStringSubmatch(text)
-			if len(match) > 1 {
-				title := strings.TrimSpace(match[1])
-				if title != "" {
-					if err := s.Repo.UpsertBookContent(bookID, LangEnglish, title); err != nil {
-						errFetch = fmt.Errorf("failed to save english title for book index %d: %w", bookIndex, err)
-					}
-				}
-			}
-		})
-	})
-
-	if err := c.Visit(url); err != nil {
-		return fmt.Errorf("failed to visit english title page for book index %d: %w", bookIndex, err)
-	}
-	if errFetch != nil {
-		return errFetch
-	}
-	return nil
-}
-
+// chapterContext carries validated per-request crawl parameters.
 type chapterContext struct {
 	bookID    uuid.UUID
-	bookIndex int
-	chapSort  int
+	bookIndex int // 0-based spec index
+	chapSort  int // 1-based chapter number within the book
 	lang      string
+	maxVerses int // spec verse count for this book+chapter+language
 }
 
-// parseChapterContext validates per-request context values before DB writes.
+// parseChapterContext validates all Colly context values before any DB writes.
 func parseChapterContext(ctx *colly.Context) (chapterContext, error) {
 	rawBookID := strings.TrimSpace(ctx.Get("bookID"))
 	if rawBookID == "" {
@@ -260,32 +156,24 @@ func parseChapterContext(ctx *colly.Context) (chapterContext, error) {
 		return chapterContext{}, fmt.Errorf("invalid bookID %q: %w", rawBookID, err)
 	}
 
-	rawBookIndex := strings.TrimSpace(ctx.Get("bookIndex"))
-	bookIndex, err := strconv.Atoi(rawBookIndex)
-	if err != nil {
-		return chapterContext{}, fmt.Errorf("invalid bookIndex %q: %w", rawBookIndex, err)
-	}
-	if bookIndex < 0 || bookIndex >= len(bibleChapterCounts) {
-		return chapterContext{}, fmt.Errorf("bookIndex out of range: %d", bookIndex)
+	bookIndex, err := strconv.Atoi(strings.TrimSpace(ctx.Get("bookIndex")))
+	if err != nil || bookIndex < 0 || bookIndex >= 66 {
+		return chapterContext{}, fmt.Errorf("invalid bookIndex %q", ctx.Get("bookIndex"))
 	}
 
-	rawChapSort := strings.TrimSpace(ctx.Get("chapSort"))
-	chapSort, err := strconv.Atoi(rawChapSort)
-	if err != nil {
-		return chapterContext{}, fmt.Errorf("invalid chapSort %q: %w", rawChapSort, err)
+	chapSort, err := strconv.Atoi(strings.TrimSpace(ctx.Get("chapSort")))
+	if err != nil || chapSort <= 0 {
+		return chapterContext{}, fmt.Errorf("invalid chapSort %q", ctx.Get("chapSort"))
 	}
-	if chapSort <= 0 || chapSort > bibleChapterCounts[bookIndex] {
-		return chapterContext{}, fmt.Errorf(
-			"chapter sort out of range for bookIndex=%d: chap=%d max=%d",
-			bookIndex,
-			chapSort,
-			bibleChapterCounts[bookIndex],
-		)
+
+	maxVerses, err := strconv.Atoi(strings.TrimSpace(ctx.Get("maxVerses")))
+	if err != nil || maxVerses <= 0 {
+		return chapterContext{}, fmt.Errorf("invalid maxVerses %q", ctx.Get("maxVerses"))
 	}
 
 	lang := strings.TrimSpace(ctx.Get("lang"))
 	if lang != LangChinese && lang != LangEnglish {
-		return chapterContext{}, fmt.Errorf("unsupported language in context: %q", lang)
+		return chapterContext{}, fmt.Errorf("unsupported language %q", lang)
 	}
 
 	return chapterContext{
@@ -293,65 +181,79 @@ func parseChapterContext(ctx *colly.Context) (chapterContext, error) {
 		bookIndex: bookIndex,
 		chapSort:  chapSort,
 		lang:      lang,
+		maxVerses: maxVerses,
 	}, nil
 }
 
-// crawlChapters asynchronously crawls every chapter page in both languages,
-// then persists chapter + verse rows using repository-level idempotent writes.
+// crawlChapters asynchronously crawls every chapter page in both languages.
+// The spec drives which chapters exist and how many verses each should have.
 func (s *BibleScraper) crawlChapters(books []BookMeta) {
 	log.Println("Phase 2: Crawling Chapters...")
 
 	c := s.C.Clone()
 
 	c.OnResponse(func(r *colly.Response) {
-		ctx, err := parseChapterContext(r.Ctx)
+		cc, err := parseChapterContext(r.Ctx)
 		if err != nil {
-			log.Printf("Skipping response with invalid crawl context (url=%s): %v", r.Request.URL.String(), err)
+			log.Printf("Skipping response with invalid context (url=%s): %v",
+				r.Request.URL.String(), err)
 			return
 		}
 
 		var body string
-		if ctx.lang == LangChinese {
+		if cc.lang == LangChinese {
 			body, err = utils.Big5ToUTF8(r.Body)
 		} else {
 			body = string(r.Body)
 		}
 		if err != nil {
-			log.Printf("Encoding error for lang=%s chapter=%d: %v", ctx.lang, ctx.chapSort, err)
+			log.Printf("Encoding error lang=%s chap=%d: %v", cc.lang, cc.chapSort, err)
 			return
 		}
 
-		chapID, err := s.Repo.GetOrCreateChapter(ctx.bookID, ctx.chapSort)
+		chapID, err := s.Repo.GetOrCreateChapter(cc.bookID, cc.chapSort)
 		if err != nil {
-			log.Printf("DB error creating chapter row (bookID=%s chap=%d): %v", ctx.bookID, ctx.chapSort, err)
+			log.Printf("DB error creating chapter (bookID=%s chap=%d): %v",
+				cc.bookID, cc.chapSort, err)
 			return
 		}
 
-		chapTitle := fmt.Sprintf("第 %d 章", ctx.chapSort)
-		if ctx.lang == LangEnglish {
-			chapTitle = fmt.Sprintf("Chapter %d", ctx.chapSort)
+		chapTitle := fmt.Sprintf("第 %d 章", cc.chapSort)
+		if cc.lang == LangEnglish {
+			chapTitle = fmt.Sprintf("Chapter %d", cc.chapSort)
 		}
-		if err = s.Repo.UpsertChapterContent(chapID, ctx.lang, chapTitle); err != nil {
-			log.Printf("DB error saving chapter content (chapID=%s lang=%s): %v", chapID, ctx.lang, err)
+		if err = s.Repo.UpsertChapterContent(chapID, cc.lang, chapTitle); err != nil {
+			log.Printf("DB error saving chapter content (chapID=%s lang=%s): %v",
+				chapID, cc.lang, err)
 		}
 
 		doc, err := goquery.NewDocumentFromReader(strings.NewReader(body))
 		if err != nil {
-			log.Printf("GoQuery parse error (bookID=%s chap=%d): %v", ctx.bookID, ctx.chapSort, err)
+			log.Printf("GoQuery parse error (bookID=%s chap=%d): %v",
+				cc.bookID, cc.chapSort, err)
 			return
 		}
 
 		doc.Find("script, style, a").Remove()
 
-		foundVerses := false
+		foundVerses := 0
 		doc.Find("ol li").Each(func(i int, sel *goquery.Selection) {
 			verseNum := i + 1
 			if valStr, exists := sel.Attr("value"); exists {
-				if parsedVerseNum, parseErr := strconv.Atoi(strings.TrimSpace(valStr)); parseErr == nil && parsedVerseNum > 0 {
-					verseNum = parsedVerseNum
+				if parsed, parseErr := strconv.Atoi(strings.TrimSpace(valStr)); parseErr == nil && parsed > 0 {
+					verseNum = parsed
 				} else {
-					log.Printf("Invalid verse number value %q, using fallback index %d", valStr, verseNum)
+					log.Printf("Invalid verse value %q, using fallback %d", valStr, verseNum)
 				}
+			}
+
+			// Spec guard: reject verse numbers beyond what the JSON spec defines.
+			// This prevents creating orphan sections from HTML artifacts or
+			// cross-translation versification mismatches.
+			if verseNum > cc.maxVerses {
+				log.Printf("Skipping verse %d: exceeds spec max=%d (book=%d chap=%d lang=%s)",
+					verseNum, cc.maxVerses, cc.bookIndex+1, cc.chapSort, cc.lang)
+				return
 			}
 
 			content := utils.CleanText(sel.Text())
@@ -359,61 +261,80 @@ func (s *BibleScraper) crawlChapters(books []BookMeta) {
 				return
 			}
 
-			if saveErr := s.saveVerse(ctx.bookID, chapID, verseNum, ctx.lang, content); saveErr != nil {
-				log.Printf("Failed to save verse (bookID=%s chap=%d verse=%d lang=%s): %v",
-					ctx.bookID, ctx.chapSort, verseNum, ctx.lang, saveErr)
+			if saveErr := s.saveVerse(cc.bookID, chapID, verseNum, cc.lang, content); saveErr != nil {
+				log.Printf("Failed to save verse (book=%d chap=%d verse=%d lang=%s): %v",
+					cc.bookIndex+1, cc.chapSort, verseNum, cc.lang, saveErr)
 				return
 			}
-			foundVerses = true
+			foundVerses++
 		})
 
-		if !foundVerses {
-			log.Printf("Warning: no verses found for bookID=%s chapter=%d lang=%s", ctx.bookID, ctx.chapSort, ctx.lang)
+		if foundVerses == 0 {
+			log.Printf("Warning: no verses found (book=%d chap=%d lang=%s)",
+				cc.bookIndex+1, cc.chapSort, cc.lang)
 		}
 	})
 
 	for _, book := range books {
 		if book.ID == uuid.Nil {
-			log.Printf("Skipping book with nil ID (index=%d name=%s)", book.Index, book.Name)
-			continue
-		}
-		if book.Index < 0 || book.Index >= len(bibleChapterCounts) {
-			log.Printf("Skipping book with invalid index=%d name=%s", book.Index, book.Name)
+			log.Printf("Skipping book with nil ID (index=%d)", book.Index)
 			continue
 		}
 
-		maxChap := bibleChapterCounts[book.Index]
-		for chap := 1; chap <= maxChap; chap++ {
-			globalChap := globalChapStarts[book.Index] + chap - 1
+		zhBookSpec := s.Spec.ZH[book.Index]
+		enBookSpec := s.Spec.EN[book.Index]
 
-			// Chinese (CUV – 和合本)
+		for chap := 1; chap <= zhBookSpec.TotalChapters; chap++ {
+			globalChap := s.globalChapStarts[book.Index] + chap - 1
+
+			zhVerseCount, err := zhBookSpec.VerseCount(chap)
+			if err != nil {
+				log.Printf("Spec error ZH book=%d chap=%d: %v", book.Index+1, chap, err)
+				continue
+			}
+			enVerseCount, err := enBookSpec.VerseCount(chap)
+			if err != nil {
+				log.Printf("Spec error EN book=%d chap=%d: %v", book.Index+1, chap, err)
+				continue
+			}
+
+			// Queue Chinese (和合本) request.
 			ctxZH := colly.NewContext()
 			ctxZH.Put("bookID", book.ID.String())
 			ctxZH.Put("bookIndex", strconv.Itoa(book.Index))
 			ctxZH.Put("chapSort", strconv.Itoa(chap))
 			ctxZH.Put("lang", LangChinese)
-			urlCUV := fmt.Sprintf("https://springbible.fhl.net/Bible2/cgic201/read201.cgi?na=0&chap=%d&ft=0", globalChap)
+			ctxZH.Put("maxVerses", strconv.Itoa(zhVerseCount))
+			urlCUV := fmt.Sprintf(
+				"https://springbible.fhl.net/Bible2/cgic201/read201.cgi?na=0&chap=%d&ft=0",
+				globalChap)
 			if err := c.Request("GET", urlCUV, nil, ctxZH, nil); err != nil {
-				log.Printf("Failed to queue Chinese chapter request (book=%d chap=%d): %v", book.Index+1, chap, err)
+				log.Printf("Failed to queue ZH request (book=%d chap=%d): %v",
+					book.Index+1, chap, err)
 			}
 
-			// English (BBE – Basic English Bible)
+			// Queue English (BBE) request.
 			ctxEN := colly.NewContext()
 			ctxEN.Put("bookID", book.ID.String())
 			ctxEN.Put("bookIndex", strconv.Itoa(book.Index))
 			ctxEN.Put("chapSort", strconv.Itoa(chap))
 			ctxEN.Put("lang", LangEnglish)
-			urlBBE := fmt.Sprintf("https://springbible.fhl.net/Bible2/cgic201/read201.cgi?na=0&chap=%d&ver=bbe", globalChap)
+			ctxEN.Put("maxVerses", strconv.Itoa(enVerseCount))
+			urlBBE := fmt.Sprintf(
+				"https://springbible.fhl.net/Bible2/cgic201/read201.cgi?na=0&chap=%d&ver=bbe",
+				globalChap)
 			if err := c.Request("GET", urlBBE, nil, ctxEN, nil); err != nil {
-				log.Printf("Failed to queue English chapter request (book=%d chap=%d): %v", book.Index+1, chap, err)
+				log.Printf("Failed to queue EN request (book=%d chap=%d): %v",
+					book.Index+1, chap, err)
 			}
 		}
 	}
 
 	c.Wait()
+	log.Println("Phase 2 complete.")
 }
 
-// saveVerse persists one verse row and its localized content.
+// saveVerse persists one verse's structural row and localized content.
 func (s *BibleScraper) saveVerse(bookID, chapID uuid.UUID, verseNum int, lang, content string) error {
 	if verseNum <= 0 {
 		return fmt.Errorf("invalid verse number %d", verseNum)
@@ -430,11 +351,11 @@ func (s *BibleScraper) saveVerse(bookID, chapID uuid.UUID, verseNum int, lang, c
 
 	secID, err := s.Repo.GetOrCreateSection(bookID, chapID, verseNum)
 	if err != nil {
-		return fmt.Errorf("failed to get/create section %d: %w", verseNum, err)
+		return fmt.Errorf("get/create section %d: %w", verseNum, err)
 	}
 
 	if err = s.Repo.UpsertSectionContent(secID, lang, verseTitle, normalizedContent); err != nil {
-		return fmt.Errorf("failed to upsert section content %d: %w", verseNum, err)
+		return fmt.Errorf("upsert section content %d: %w", verseNum, err)
 	}
 	return nil
 }
