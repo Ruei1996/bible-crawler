@@ -20,9 +20,10 @@ import (
 // makeIntegrationSpec builds a minimal BibleSpec where book 0 has 1 chapter
 // with 2 verses and all other books have 0 chapters.
 func makeIntegrationSpec() *spec.BibleSpec {
-	zhBooks := make([]*spec.BookSpec, 66)
-	enBooks := make([]*spec.BookSpec, 66)
-	for i := 0; i < 66; i++ {
+	const numBooks = 3
+	zhBooks := make([]*spec.BookSpec, numBooks)
+	enBooks := make([]*spec.BookSpec, numBooks)
+	for i := 0; i < numBooks; i++ {
 		zhBooks[i] = &spec.BookSpec{Number: i + 1, TotalChapters: 0}
 		enBooks[i] = &spec.BookSpec{Number: i + 1, TotalChapters: 0}
 	}
@@ -76,10 +77,10 @@ func TestScraper_Run_Integration(t *testing.T) {
 	err := s.Run()
 	require.NoError(t, err)
 
-	// Verify: at least one bible_book row exists.
+	// Verify: number of bible_book rows matches the spec size.
 	var bookCount int
 	require.NoError(t, db.QueryRow(`SELECT COUNT(*) FROM bibles.bible_books`).Scan(&bookCount))
-	require.Equal(t, 66, bookCount, "expected 66 book rows")
+	require.Equal(t, len(bspec.ZH), bookCount, "book row count should match spec size")
 
 	// Verify: book 1 content exists for both languages.
 	var zhTitle, enTitle string

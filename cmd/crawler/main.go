@@ -1,7 +1,7 @@
 // cmd/crawler/main.go is the main entrypoint for the Bible crawler.
 //
 // It performs two phases:
-//   - Phase 1: write all 66 book rows and their Chinese/English titles from the
+//   - Phase 1: write all book rows and their Chinese/English titles from the
 //     JSON spec files (no HTTP requests).
 //   - Phase 2: concurrently fetch every chapter page in both 和合本 (CUV) and
 //     BBE, then persist each verse using the per-language spec verse bounds.

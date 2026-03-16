@@ -85,10 +85,10 @@ func (b *BookSpec) buildVerseCounts() error {
 	return nil
 }
 
-// BibleSpec holds per-language book specs for all 66 canonical books.
-// ZH[i] and EN[i] both describe the same book (index 0 = Genesis, 65 = Revelation)
-// but may report different verse counts where the Chinese 和合本 and English BBE
-// place chapter boundaries differently.
+// BibleSpec holds per-language book specs for every book in the crawled Bible.
+// ZH[i] and EN[i] describe the same book at each index but may report different
+// verse counts where the Chinese 和合本 and English BBE place chapter boundaries
+// differently. The total number of books is determined by the spec JSON files.
 type BibleSpec struct {
 	ZH []*BookSpec // 和合本 (Chinese CUV) — loaded from bible_books_zh.json
 	EN []*BookSpec // Basic English Version (BBE) — loaded from bible_books_en.json
@@ -136,11 +136,11 @@ func Load(zhPath, enPath string) (*BibleSpec, error) {
 	if err != nil {
 		return nil, fmt.Errorf("loading EN spec from %s: %w", enPath, err)
 	}
-	if len(zh) != 66 {
-		return nil, fmt.Errorf("ZH spec: expected 66 books, got %d", len(zh))
+	if len(zh) == 0 {
+		return nil, fmt.Errorf("ZH spec: no books found in %s", zhPath)
 	}
-	if len(en) != 66 {
-		return nil, fmt.Errorf("EN spec: expected 66 books, got %d", len(en))
+	if len(zh) != len(en) {
+		return nil, fmt.Errorf("ZH and EN specs have different book counts: ZH=%d EN=%d", len(zh), len(en))
 	}
 	return &BibleSpec{ZH: zh, EN: en}, nil
 }
@@ -195,12 +195,12 @@ func loadENBooks(path string) ([]*BookSpec, error) {
 	return books, nil
 }
 
-// GlobalChapStarts returns the 1-based global chapter index for each book's
-// first chapter, computed from the ZH spec's TotalChapters values.
-// Genesis=1, Exodus=51, …, Revelation=1168.
-// This index is the "chap" URL parameter used by the source website.
-func (s *BibleSpec) GlobalChapStarts() [66]int {
-	var starts [66]int
+// GlobalChapStarts returns a slice where element i is the 1-based global
+// chapter index for book i's first chapter, computed from the ZH spec's
+// TotalChapters values. This index is the "chap" URL parameter used by the
+// source website (e.g. Genesis starts at 1, Exodus at 51 for the standard canon).
+func (s *BibleSpec) GlobalChapStarts() []int {
+	starts := make([]int, len(s.ZH))
 	offset := 1
 	for i, book := range s.ZH {
 		starts[i] = offset

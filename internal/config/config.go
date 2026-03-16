@@ -37,7 +37,7 @@ DBUrl string
 // SourceDomain — bare hostname used by Colly AllowedDomains and LimitRule.
 // SourceZHURL  — URL template for Chinese (和合本 CUV) chapter pages.
 //               Must contain exactly one %d placeholder for the global
-//               chapter index (1-based, sequential across all 66 books).
+//               chapter index (1-based, sequential across all books).
 // SourceENURL  — URL template for English (BBE) chapter pages.
 //               Same %d convention as SourceZHURL.
 SourceDomain string

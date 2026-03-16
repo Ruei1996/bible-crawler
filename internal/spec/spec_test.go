@@ -20,8 +20,9 @@ const (
 func TestLoad_RealFiles(t *testing.T) {
 	s, err := spec.Load(realZHPath, realENPath)
 	require.NoError(t, err)
-	assert.Len(t, s.ZH, 66)
-	assert.Len(t, s.EN, 66)
+	assert.NotEmpty(t, s.ZH)
+	assert.NotEmpty(t, s.EN)
+	assert.Equal(t, len(s.ZH), len(s.EN), "ZH and EN should have the same number of books")
 }
 
 func TestLoad_ZHNotFound(t *testing.T) {
@@ -103,14 +104,14 @@ func TestLoad_ZHWrongBookCount(t *testing.T) {
 	zhPath := writeTempJSON(t, makeZHDoc(1))
 	_, err := spec.Load(zhPath, realENPath)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "66")
+	assert.Contains(t, err.Error(), "different book counts")
 }
 
 func TestLoad_ENWrongBookCount(t *testing.T) {
 	enPath := writeTempJSON(t, makeENDoc(1))
 	_, err := spec.Load(realZHPath, enPath)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "66")
+	assert.Contains(t, err.Error(), "different book counts")
 }
 
 func TestBookSpec_VerseCount(t *testing.T) {

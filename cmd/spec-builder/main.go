@@ -48,10 +48,11 @@ type bookMeta struct {
 	NameEN      string
 }
 
-// defaultBookMeta is the authoritative static list of all 66 canonical books.
-// It is always used as the source of names and testament labels.
-// The spec-builder never reads the existing JSON files for these values.
-var defaultBookMeta = [66]bookMeta{
+// defaultBookMeta is the static list of book names and testament labels used
+// by the spec-builder. It provides the names and classification for each book;
+// actual verse counts are discovered dynamically by fetching chapter pages.
+// The spec-builder never reads existing JSON files for these values.
+var defaultBookMeta = []bookMeta{
 	{1, "OT", "舊約", "創世記", "Genesis"},
 	{2, "OT", "舊約", "出埃及記", "Exodus"},
 	{3, "OT", "舊約", "利未記", "Leviticus"},
@@ -123,9 +124,9 @@ var defaultBookMeta = [66]bookMeta{
 // ── Chapter count tables ──────────────────────────────────────────────────────
 
 // bibleChapterCounts is the total number of chapters per book.
-// Both translations share the same chapter count; only verse counts differ.
-// Index 0 = Genesis, index 65 = Revelation.
-var bibleChapterCounts = [66]int{
+// Both translations share the same chapter structure; only verse counts differ.
+// Index 0 = first book in defaultBookMeta, last index = last book.
+var bibleChapterCounts = []int{
 	50, 40, 27, 36, 34, 24, 21, 4, 31, 24,
 	22, 25, 29, 36, 10, 13, 10, 42, 150, 31,
 	12, 8, 66, 52, 5, 48, 12, 14, 3, 9,
@@ -137,13 +138,14 @@ var bibleChapterCounts = [66]int{
 
 // globalChapStarts[i] = 1-based global chapter index for book i's first chapter.
 // Used to construct the source website's "chap=" URL parameter.
-var globalChapStarts [66]int
+var globalChapStarts []int
 
 func init() {
+	globalChapStarts = make([]int, len(defaultBookMeta))
 	offset := 1
-	for i := 0; i < 66; i++ {
+	for i, count := range bibleChapterCounts {
 		globalChapStarts[i] = offset
-		offset += bibleChapterCounts[i]
+		offset += count
 	}
 }
 
@@ -320,7 +322,8 @@ func main() {
 	for _, c := range bibleChapterCounts {
 		totalRequests += c * 2 // one ZH request + one EN request per chapter
 	}
-	log.Printf("Spec-builder starting: %d HTTP requests (1189 chapters × 2 languages).", totalRequests)
+	log.Printf("Spec-builder starting: %d HTTP requests (%d chapters × 2 languages).",
+		totalRequests, totalRequests/2)
 	log.Println("This will take several minutes. Please wait…")
 
 	// Semaphore limits concurrent outbound connections; value from config.
@@ -328,7 +331,7 @@ func main() {
 	results := make(chan chapterResult, totalRequests)
 
 	var wg sync.WaitGroup
-	for bookIdx := 0; bookIdx < 66; bookIdx++ {
+	for bookIdx := 0; bookIdx < len(defaultBookMeta); bookIdx++ {
 		for chap := 1; chap <= bibleChapterCounts[bookIdx]; chap++ {
 			globalChap := globalChapStarts[bookIdx] + chap - 1
 			for _, isChinese := range []bool{true, false} {
@@ -363,12 +366,12 @@ func main() {
 		close(results)
 	}()
 
-	// Accumulate verse counts into per-book slices indexed by (chapNum - 1).
-	zhCounts := [66][]int{}
-	enCounts := [66][]int{}
-	for i := 0; i < 66; i++ {
-		zhCounts[i] = make([]int, bibleChapterCounts[i])
-		enCounts[i] = make([]int, bibleChapterCounts[i])
+	numBooks := len(defaultBookMeta)
+	zhCounts := make([][]int, numBooks)
+	enCounts := make([][]int, numBooks)
+	for i, chapCount := range bibleChapterCounts {
+		zhCounts[i] = make([]int, chapCount)
+		enCounts[i] = make([]int, chapCount)
 	}
 
 	done, errCount := 0, 0
@@ -405,28 +408,28 @@ func main() {
 
 // ── Spec writers ──────────────────────────────────────────────────────────────
 
-// buildSummary computes aggregate verse statistics from the per-book counts.
-// Testament classification is taken from defaultBookMeta.
-func buildSummary(counts [66][]int) (summary summaryBlock, bookTotals [66]int) {
-	summary.TotalBooks = 66
-	summary.TotalChapters = 1189
-	for i, b := range defaultBookMeta {
-		bookTotal := 0
+// buildSummary computes aggregate verse and chapter statistics from the per-book
+// counts. Testament classification is taken from defaultBookMeta.
+func buildSummary(counts [][]int) (summary summaryBlock, bookTotals []int) {
+	numBooks := len(defaultBookMeta)
+	bookTotals = make([]int, numBooks)
+	for i := 0; i < numBooks; i++ {
 		for _, v := range counts[i] {
-			bookTotal += v
+			bookTotals[i] += v
 		}
-		bookTotals[i] = bookTotal
-		summary.TotalVerses += bookTotal
-		if b.Testament == "OT" {
-			summary.OldTestament.Verses += bookTotal
+		summary.TotalVerses += bookTotals[i]
+		summary.TotalChapters += len(counts[i])
+		if defaultBookMeta[i].Testament == "OT" {
+			summary.OldTestament.Books++
+			summary.OldTestament.Chapters += len(counts[i])
+			summary.OldTestament.Verses += bookTotals[i]
 		} else {
-			summary.NewTestament.Verses += bookTotal
+			summary.NewTestament.Books++
+			summary.NewTestament.Chapters += len(counts[i])
+			summary.NewTestament.Verses += bookTotals[i]
 		}
 	}
-	summary.OldTestament.Books = 39
-	summary.OldTestament.Chapters = 929
-	summary.NewTestament.Books = 27
-	summary.NewTestament.Chapters = 260
+	summary.TotalBooks = numBooks
 	return
 }
 
@@ -443,9 +446,9 @@ func versesPerChapterMap(chapCounts []int) map[string]int {
 
 // writeZHSpec builds and writes bible_books_zh.json.
 // Only Chinese name fields (name_zh, testament_zh) are included.
-func writeZHSpec(path string, counts [66][]int) error {
+func writeZHSpec(path string, counts [][]int) error {
 	summary, bookTotals := buildSummary(counts)
-	books := make([]zhBookJSON, 66)
+	books := make([]zhBookJSON, len(defaultBookMeta))
 	for i, b := range defaultBookMeta {
 		books[i] = zhBookJSON{
 			Number:           b.Number,
@@ -473,9 +476,9 @@ func writeZHSpec(path string, counts [66][]int) error {
 
 // writeENSpec builds and writes bible_books_en.json.
 // Only English name fields (name_en, testament) are included.
-func writeENSpec(path string, counts [66][]int) error {
+func writeENSpec(path string, counts [][]int) error {
 	summary, bookTotals := buildSummary(counts)
-	books := make([]enBookJSON, 66)
+	books := make([]enBookJSON, len(defaultBookMeta))
 	for i, b := range defaultBookMeta {
 		books[i] = enBookJSON{
 			Number:           b.Number,

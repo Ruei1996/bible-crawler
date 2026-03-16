@@ -7,7 +7,7 @@
 - **Spec 驅動爬取**：各章節的實際節數從 `bible_books_zh.json`（和合本）與 `bible_books_en.json`（BBE）讀取，程式碼零硬寫數字，完全由 JSON 規格控制。
 - **三階段工作流程**：
   - **Stage 0 — Spec Builder**：爬取每個章節（兩語言），發現實際節數，寫入兩份 JSON 規格檔。首次建置或需更新規格時執行。
-  - **Stage 1 — 書本設定**：直接從 JSON 規格寫入 66 卷書的中英文書名（不需 HTTP 請求）。
+  - **Stage 1 — 書本設定**：直接從 JSON 規格寫入所有書卷的中英文書名（不需 HTTP 請求）。書卷總數完全由 Stage 0 產生的規格檔決定。
   - **Stage 2 — 章節與經文爬取**：非同步併發爬取 1,189 個章節 × 2 語言，依各語言的規格節數上限存入資料庫。
 - **版本節數差異處理（Versification-Aware）**：和合本與 BBE 在部分書卷（例如利未記、撒迦利亞書）的章節邊界不同。Spec 檔案記錄各語言的正確節數，爬蟲自動依上限存入，不會寫入超出範圍的節。
 - **冪等寫入（Idempotent）**：所有 DB 寫入使用 `SELECT → INSERT → SELECT` 三步驟模式（對併發 goroutine 安全無 race condition）。重複執行爬蟲不會產生重複資料。
@@ -76,7 +76,7 @@
 | `-covermode=atomic` | **執行緒安全的覆蓋率計數器。** 共有三種模式：`set`（每行是否被執行 — 布林值）、`count`（被執行幾次）、`atomic`（與 `count` 相同，但使用 CPU 原子操作，避免計數器本身產生 race condition）。**只要測試有並行執行，請一律使用 `atomic`。** |
 | `-timeout 300s` | **全域執行時限。** 若整個測試套件在 5 分鐘內未完成，Go 會終止所有 goroutine 並將本次執行標記為失敗。預設值為 10 分鐘（`10m0s`）。整合測試需要啟動 Docker 容器，耗時較長，建議明確設定此值以避免 CI 靜默逾時。 |
 
-> **需要 Docker**（Testcontainers 會啟動 `postgres:16-alpine` 容器）。  
+> **需要 Docker**（Testcontainers 會啟動 `postgres:18` 容器）。  
 > **輸出：** 產生 `coverage.out` — 這是資料檔，不是人可直接閱讀的報告。需搭配 `go tool cover` 使用。
 
 ---
@@ -229,7 +229,7 @@ go test -json ./... | jq '.Output' -r
 
 | 資料表 | 用途 |
 |--------|------|
-| `bibles.bible_books` | 每卷書一列（sort 1–66） |
+| `bibles.bible_books` | 每卷書一列（sort 順序由規格檔決定） |
 | `bibles.bible_book_contents` | 書名本地化（chinese / english） |
 | `bibles.bible_chapters` | 每章一列（隸屬於書） |
 | `bibles.bible_chapter_contents` | 章名本地化 |
@@ -291,11 +291,11 @@ go run cmd/spec-builder/main.go
 
 預期輸出：
 ```text
-Spec-builder starting: 2378 HTTP requests (1189 chapters × 2 languages).
-Progress: 200/2378 requests done (0 errors)
+Spec-builder starting: N HTTP requests (M chapters × 2 languages).
+Progress: 200/N requests done (0 errors)
 ...
-Writing ZH (和合本): total_verses=31102 (OT=23145 NT=7957)
-Writing EN (BBE): total_verses=31173 (OT=23214 NT=7959)
+Writing ZH (和合本): total_verses=XXXXX (OT=XXXXX NT=XXXXX)
+Writing EN (BBE): total_verses=XXXXX (OT=XXXXX NT=XXXXX)
 Done. Written:
   /path/to/bible_books_zh.json
   /path/to/bible_books_en.json
@@ -314,7 +314,7 @@ go run cmd/crawler/main.go
 Connected to database successfully
 Starting Bible Crawler...
 Phase 1: Setting up Books from spec...
-Phase 1 complete: 66 books ready.
+Phase 1 complete: N books ready.
 Phase 2: Crawling Chapters...
 Phase 2 complete.
 Bible Crawler finished successfully.

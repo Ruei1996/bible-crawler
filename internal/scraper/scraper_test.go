@@ -36,13 +36,18 @@ func newMockRepo(t *testing.T) (*repository.BibleRepository, sqlmock.Sqlmock) {
 	return repository.NewBibleRepository(sqlx.NewDb(db, "sqlmock")), mock
 }
 
-// makeMinimalSpec builds a BibleSpec with 66 books where only book at index
-// bookIdx has chapters. All other books have 0 chapters so no HTTP requests
+// testSpecSize is the number of books used in test BibleSpecs. Kept small so
+// tests run fast and so the scraper's dynamic len(Spec.ZH) behaviour is exercised
+// without relying on any fixed book count.
+const testSpecSize = 3
+
+// makeMinimalSpec builds a BibleSpec with testSpecSize books where only the book
+// at bookIdx has chapters. All other books have 0 chapters so no HTTP requests
 // are queued for them.
 func makeMinimalSpec(bookIdx, chapters, verses int) *spec.BibleSpec {
-	zhBooks := make([]*spec.BookSpec, 66)
-	enBooks := make([]*spec.BookSpec, 66)
-	for i := 0; i < 66; i++ {
+	zhBooks := make([]*spec.BookSpec, testSpecSize)
+	enBooks := make([]*spec.BookSpec, testSpecSize)
+	for i := 0; i < testSpecSize; i++ {
 		zhBooks[i] = &spec.BookSpec{Number: i + 1, TotalChapters: 0}
 		enBooks[i] = &spec.BookSpec{Number: i + 1, TotalChapters: 0}
 	}
@@ -152,10 +157,14 @@ func TestParseChapterContext_BookIndexNegative(t *testing.T) {
 	require.Error(t, err)
 }
 
-func TestParseChapterContext_BookIndex66(t *testing.T) {
-	ctx := makeCtx(t, uuid.New().String(), "66", "1", "chinese", "31")
-	_, err := parseChapterContext(ctx)
-	require.Error(t, err)
+// TestParseChapterContext_BookIndexLargePositive verifies that a large positive
+// book index is accepted. parseChapterContext only rejects negative values;
+// the upper bound is determined by the spec at call time, not hardcoded here.
+func TestParseChapterContext_BookIndexLargePositive(t *testing.T) {
+	ctx := makeCtx(t, uuid.New().String(), "999", "1", "chinese", "31")
+	cc, err := parseChapterContext(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, 999, cc.bookIndex)
 }
 
 func TestParseChapterContext_ChapSortZero(t *testing.T) {
@@ -331,9 +340,9 @@ func TestCrawlChapters_NilBookID(t *testing.T) {
 func TestCrawlChapters_ZHVerseCountError(t *testing.T) {
 	repo, mock := newMockRepo(t)
 
-	zhBooks := make([]*spec.BookSpec, 66)
-	enBooks := make([]*spec.BookSpec, 66)
-	for i := 0; i < 66; i++ {
+	zhBooks := make([]*spec.BookSpec, testSpecSize)
+	enBooks := make([]*spec.BookSpec, testSpecSize)
+	for i := 0; i < testSpecSize; i++ {
 		zhBooks[i] = &spec.BookSpec{Number: i + 1, TotalChapters: 0}
 		enBooks[i] = &spec.BookSpec{Number: i + 1, TotalChapters: 0}
 	}
@@ -363,9 +372,9 @@ func TestCrawlChapters_ZHVerseCountError(t *testing.T) {
 func TestCrawlChapters_ENVerseCountError(t *testing.T) {
 	repo, mock := newMockRepo(t)
 
-	zhBooks := make([]*spec.BookSpec, 66)
-	enBooks := make([]*spec.BookSpec, 66)
-	for i := 0; i < 66; i++ {
+	zhBooks := make([]*spec.BookSpec, testSpecSize)
+	enBooks := make([]*spec.BookSpec, testSpecSize)
+	for i := 0; i < testSpecSize; i++ {
 		zhBooks[i] = &spec.BookSpec{Number: i + 1, TotalChapters: 0}
 		enBooks[i] = &spec.BookSpec{Number: i + 1, TotalChapters: 0}
 	}
@@ -669,7 +678,7 @@ const (
 func TestSetupBooks_AllGetOrCreateFail(t *testing.T) {
 	repo, mock := newMockRepo(t)
 	mock.MatchExpectationsInOrder(false)
-	for i := 0; i < 66; i++ {
+	for i := 0; i < testSpecSize; i++ {
 		mock.ExpectQuery(qre(sqlSelectBook)).WillReturnError(fmt.Errorf("db error"))
 	}
 	bspec := makeMinimalSpec(0, 0, 0)
@@ -680,7 +689,7 @@ func TestSetupBooks_AllGetOrCreateFail(t *testing.T) {
 	s := NewBibleScraper(repo, bspec, cfg)
 	_, err := s.setupBooks()
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "66")
+	assert.Contains(t, err.Error(), "books set up")
 }
 
 func TestSetupBooks_UpsertBookContentError(t *testing.T) {
@@ -689,7 +698,7 @@ func TestSetupBooks_UpsertBookContentError(t *testing.T) {
 	// (no DB call). Only book[0] reaches the DB.
 	repo, mock := newMockRepo(t)
 	mock.MatchExpectationsInOrder(false)
-	for i := 0; i < 66; i++ {
+	for i := 0; i < testSpecSize; i++ {
 		bookID := uuid.New()
 		mock.ExpectQuery(qre(sqlSelectBook)).
 			WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(bookID))
@@ -706,7 +715,7 @@ func TestSetupBooks_UpsertBookContentError(t *testing.T) {
 	s := NewBibleScraper(repo, bspec, cfg)
 	books, err := s.setupBooks()
 	require.NoError(t, err)
-	assert.Len(t, books, 66)
+	assert.Len(t, books, testSpecSize)
 	assert.NoError(t, mock.ExpectationsWereMet())
 }
 
@@ -717,7 +726,7 @@ func TestSetupBooks_UpsertBookContentError(t *testing.T) {
 func TestRun_SetupBooksError(t *testing.T) {
 	repo, mock := newMockRepo(t)
 	mock.MatchExpectationsInOrder(false)
-	for i := 0; i < 66; i++ {
+	for i := 0; i < testSpecSize; i++ {
 		mock.ExpectQuery(qre(sqlSelectBook)).WillReturnError(fmt.Errorf("db error"))
 	}
 	bspec := makeMinimalSpec(0, 0, 0)
@@ -768,8 +777,8 @@ func TestRun_Success(t *testing.T) {
 	repo, mock := newMockRepo(t)
 	mock.MatchExpectationsInOrder(false)
 
-	// Phase 1: setupBooks – 66 books, each found on first SELECT.
-	for i := 0; i < 66; i++ {
+	// Phase 1: setupBooks – one SELECT per book in the spec.
+	for i := 0; i < testSpecSize; i++ {
 		mock.ExpectQuery(qre(sqlSelectBook)).
 			WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(uuid.New()))
 	}

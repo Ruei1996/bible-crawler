@@ -7,7 +7,7 @@ A high-performance, concurrent web crawler written in Go. It scrapes Bible conte
 - **Spec-Driven Crawling**: Per-language verse counts are sourced from `bible_books_zh.json` / `bible_books_en.json`. The crawler never hard-codes verse numbers — all limits come from the JSON spec files.
 - **Three-Stage Workflow**:
   - **Stage 0 — Spec Builder**: Crawls every chapter in both languages to discover actual verse counts, then writes the two JSON spec files. Run once (or whenever you need to refresh the spec).
-  - **Stage 1 — Book Setup**: Writes all 66 book names from the JSON spec directly to the DB (no HTTP needed).
+  - **Stage 1 — Book Setup**: Writes all book names from the JSON spec directly to the DB (no HTTP needed). The number of books is determined entirely by the spec files generated in Stage 0.
   - **Stage 2 — Chapter & Verse Crawl**: Asynchronously fetches 1,189 chapters × 2 languages and persists verses, bounded by each language's spec verse count.
 - **Versification-Aware**: Chinese 和合本 and English BBE differ in chapter boundary placement for several books (e.g. Leviticus, Zechariah). The spec files capture the correct verse count per language so the crawler never writes out-of-range verse rows.
 - **Idempotent Writes**: Every DB write uses a `SELECT → INSERT → SELECT` pattern (race-condition safe for concurrent goroutines). Re-running the crawler never creates duplicates.
@@ -76,7 +76,7 @@ The definitive **coverage run** — compiles integration test files alongside un
 | `-covermode=atomic` | **Thread-safe coverage counters.** Three modes exist: `set` (was a line hit — boolean), `count` (how many times), `atomic` (same as `count` but uses CPU atomic ops, preventing data races inside the coverage counters themselves). **Always use `atomic` when tests run in parallel.** |
 | `-timeout 300s` | **Global deadline.** Kills the run and marks it failed if it hasn't finished in 5 minutes. The default is 10 minutes (`10m0s`). Integration tests that start Docker containers need more time, so an explicit value prevents silent CI timeouts. |
 
-> **Requires Docker** (Testcontainers starts a `postgres:16-alpine` container).  
+> **Requires Docker** (Testcontainers starts a `postgres:18` container).  
 > **Output:** produces `coverage.out` — a data file, not a human report. Use `go tool cover` to read it.
 
 ---
@@ -229,7 +229,7 @@ The crawler writes to the `bibles` schema. Six tables, three structural and thre
 
 | Table | Purpose |
 |-------|---------|
-| `bibles.bible_books` | One row per book (sort 1–66) |
+| `bibles.bible_books` | One row per book (sort order driven by spec) |
 | `bibles.bible_book_contents` | Localized book title (chinese / english) |
 | `bibles.bible_chapters` | One row per chapter within a book |
 | `bibles.bible_chapter_contents` | Localized chapter title |
@@ -265,7 +265,7 @@ DATABASE_URL=postgres://username:password@localhost:5432/topchurch_dev?sslmode=d
 # ── Source website ────────────────────────────────────────────────────────────
 # Update these three values if the website migrates or you switch Bible translations.
 # SOURCE_ZH_URL and SOURCE_EN_URL must each contain one %d placeholder for the
-# global chapter index (1-based, sequential across all 66 books).
+# global chapter index (1-based, sequential across all books).
 SOURCE_DOMAIN=springbible.fhl.net
 SOURCE_ZH_URL=https://springbible.fhl.net/Bible2/cgic201/read201.cgi?na=0&chap=%d&ft=0
 SOURCE_EN_URL=https://springbible.fhl.net/Bible2/cgic201/read201.cgi?na=0&chap=%d&ver=bbe
@@ -292,11 +292,11 @@ Expected duration: **5–10 minutes** (5 concurrent workers).
 
 Expected output:
 ```text
-Spec-builder starting: 2378 HTTP requests (1189 chapters × 2 languages).
-Progress: 200/2378 requests done (0 errors)
+Spec-builder starting: N HTTP requests (M chapters × 2 languages).
+Progress: 200/N requests done (0 errors)
 ...
-Writing ZH (和合本): total_verses=31102 (OT=23145 NT=7957)
-Writing EN (BBE): total_verses=31173 (OT=23214 NT=7959)
+Writing ZH (和合本): total_verses=XXXXX (OT=XXXXX NT=XXXXX)
+Writing EN (BBE): total_verses=XXXXX (OT=XXXXX NT=XXXXX)
 Done. Written:
   /path/to/bible_books_zh.json
   /path/to/bible_books_en.json
@@ -315,7 +315,7 @@ Expected output:
 Connected to database successfully
 Starting Bible Crawler...
 Phase 1: Setting up Books from spec...
-Phase 1 complete: 66 books ready.
+Phase 1 complete: N books ready.
 Phase 2: Crawling Chapters...
 Phase 2 complete.
 Bible Crawler finished successfully.

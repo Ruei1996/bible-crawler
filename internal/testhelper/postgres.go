@@ -64,7 +64,7 @@ func StartPostgres(t *testing.T) (db *sqlx.DB, cleanup func()) {
 	ctx := context.Background()
 
 	ctr, err := postgres.Run(ctx,
-		"postgres:16-alpine",
+		"postgres:18",
 		postgres.WithDatabase("testdb"),
 		postgres.WithUsername("testuser"),
 		postgres.WithPassword("testpass"),
