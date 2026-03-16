@@ -14,6 +14,64 @@
 - **編碼處理**：自動將中文頁面的 **Big5** 編碼轉換為 UTF-8 後再解析。
 - **完全可配置**：來源 URL、並行數、延遲與 HTTP 逾時皆透過 `.env` 設定，網站更新時無需重新編譯。
 
+## 🧪 測試
+
+本專案配備完整的兩層測試套件，涵蓋所有內部套件。
+
+### 單元測試（無需外部依賴）
+
+不需要 Docker 或 PostgreSQL，直接執行：
+
+```bash
+go test ./...
+```
+
+| 套件 | 覆蓋率 |
+|------|--------|
+| `internal/config` | **100 %** |
+| `internal/repository` | **100 %** |
+| `internal/spec` | **100 %** |
+| `internal/scraper` | **96 %** |
+| `internal/utils` | **83 %** |
+
+> **未覆蓋行說明：** `crawlChapters` 中有三個防禦性錯誤分支、`Big5ToUTF8` 中有一個，這些分支在正常運作下確實無法觸及（`bytes.NewReader` 與寬鬆的 Big5 解碼器不會回傳錯誤；`strings.Reader` 上的 `goquery.NewDocumentFromReader` 也不會出錯；請求佇列時 `parseChapterContext` 的 context 永遠有效）。這些分支作為防禦性備援保留，並已文件化說明。
+
+### 整合測試（需要 Docker）
+
+整合測試透過 [Testcontainers](https://testcontainers.com/) 自動啟動真實的 PostgreSQL 16 容器，需在 Docker 執行中的環境下運行：
+
+```bash
+go test -tags integration ./... -timeout 300s
+```
+
+整合測試額外覆蓋：
+- `internal/database` — `Connect` 成功路徑及無效 URL 觸發 `os.Exit` 的子程序測試
+- `internal/repository` — 對真實資料庫的完整冪等性驗證
+- `internal/scraper` — 搭配模擬 HTTP 伺服器和真實資料庫的端對端 `Run()` 測試
+
+### 覆蓋率報告
+
+```bash
+# 僅單元測試
+go test ./internal/... -coverprofile=coverage.out -covermode=atomic
+go tool cover -func=coverage.out
+
+# 單元 + 整合測試合併
+go test -tags integration ./internal/... -coverprofile=coverage.out -covermode=atomic -timeout 300s
+go tool cover -func=coverage.out
+```
+
+### 測試相依套件
+
+| 套件 | 用途 |
+|------|------|
+| `github.com/DATA-DOG/go-sqlmock` | 單元測試用 SQL mock 驅動 |
+| `github.com/stretchr/testify` | 斷言輔助（`assert`、`require`） |
+| `github.com/testcontainers/testcontainers-go` | 基於 Docker 的整合測試容器 |
+| `github.com/testcontainers/testcontainers-go/modules/postgres` | PostgreSQL 容器模組 |
+
+---
+
 ## 🛠 前置需求
 
 - **Go** 1.21 或更高版本
@@ -132,12 +190,22 @@ bible-crawler/
 │       └── main.go           # Stage 0：發現節數，寫入 JSON 規格檔
 ├── internal/
 │   ├── config/               # 環境變數載入（所有 .env 欄位）
+│   │   └── config_test.go    # 單元測試 — 100 % 覆蓋率
 │   ├── database/             # PostgreSQL 連線設定
+│   │   └── database_test.go  # 整合測試（build tag: integration）
 │   ├── model/                # 對應資料庫的 Go Struct
 │   ├── repository/           # 冪等資料存取層（所有 SQL）
+│   │   ├── repository_test.go             # 單元測試（go-sqlmock）— 100 % 覆蓋率
+│   │   └── repository_integration_test.go # 整合測試（build tag: integration）
 │   ├── scraper/              # Colly 爬蟲核心邏輯
+│   │   ├── scraper_test.go             # 單元測試 — 96 % 覆蓋率
+│   │   └── scraper_integration_test.go  # 整合測試（build tag: integration）
 │   ├── spec/                 # JSON 規格檔載入（BibleSpec, BookSpec）
+│   │   └── spec_test.go      # 單元測試 — 100 % 覆蓋率
+│   ├── testhelper/           # 共用 Testcontainers 輔助（僅 integration build tag）
+│   │   └── postgres.go
 │   └── utils/                # Big5→UTF-8 解碼、文字清理
+│       └── encoding_test.go  # 單元測試 — 83 % 覆蓋率
 ├── bible_books_zh.json       # 和合本各章節數（由 spec-builder 自動產生）
 ├── bible_books_en.json       # BBE 各章節數（由 spec-builder 自動產生）
 ├── validation.sql            # PostgreSQL 驗證查詢 + 雙語章節內容查詢
