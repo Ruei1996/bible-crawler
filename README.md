@@ -16,59 +16,204 @@ A high-performance, concurrent web crawler written in Go. It scrapes Bible conte
 
 ## 🧪 Testing
 
-The project ships with a full two-tier test suite that covers every internal package.
+The project ships with a full two-tier test suite covering every internal package.
 
-### Unit Tests (no external dependencies)
+### Quick Reference
 
-Run without Docker or PostgreSQL:
+| Goal | Command |
+|------|---------|
+| Run all unit tests (fast, no Docker) | `go test ./...` |
+| Run unit tests — verbose, no cache | `go test -count=1 -v -parallel=4 ./...` |
+| Run all tests (unit + integration, needs Docker) | `go test -tags integration ./... -timeout 300s` |
+| Collect coverage + view summary | `go test -tags integration ./internal/... -coverprofile=coverage.out -covermode=atomic -timeout 300s && go tool cover -func=coverage.out` |
+| Open visual HTML coverage report | `go tool cover -html=coverage.out -o coverage.html && open coverage.html` |
 
-```bash
-go test ./...
+### Coverage by Package
+
+| Package | Coverage | Test tier |
+|---------|----------|-----------|
+| `internal/config` | **100 %** | unit |
+| `internal/repository` | **100 %** | unit + integration |
+| `internal/spec` | **100 %** | unit |
+| `internal/scraper` | **96 %** | unit + integration |
+| `internal/utils` | **83 %** | unit |
+
+> **Note on remaining gaps:** three defensive error branches in `crawlChapters` and one in `Big5ToUTF8` are genuinely unreachable — `bytes.NewReader` + the lenient Big5 decoder never error; `goquery.NewDocumentFromReader` on a `strings.Reader` never errors; and `parseChapterContext` context is always valid when a request is queued. They exist as safety nets and are intentionally left in.
+
+---
+
+### Understanding the Three Key Commands
+
+This section breaks down the three commands developers most commonly use so you understand exactly what each flag does.
+
+#### 1. `go test -count=1 -v -parallel=4 ./... && echo PASSla~~ || echo FAILla~~`
+
+A developer-friendly command for running all **unit** tests with full visibility.
+
+| Part | What it does |
+|------|--------------|
+| `-count=1` | **Disable caching.** Go caches passing test results — if code hasn't changed, it shows `(cached)` instead of re-running. `-count=1` forces a fresh run every time, ensuring you see real results. |
+| `-v` | **Verbose output.** Prints every `--- PASS: TestFoo (0.00s)` line as tests run. Without this, only the final per-package `ok` / `FAIL` line appears. |
+| `-parallel=4` | **Concurrent test execution.** Allows up to 4 test functions to run simultaneously — but only tests that explicitly call `t.Parallel()` opt in to this. The default is `GOMAXPROCS` (number of CPU cores). |
+| `./...` | **All packages recursively** from the current directory. |
+| `&& echo PASSla~~` | Shell short-circuit: if `go test` exits with code `0` (all pass), print this message. |
+| `\|\| echo FAILla~~` | If `go test` exits with any non-zero code (failure), print this instead. |
+
+> **Does NOT include** integration tests (no `-tags integration`), does **not** produce a coverage file.  
+> **When to use:** everyday development and CI smoke checks — maximum visibility, reliable uncached results, no Docker required.
+
+---
+
+#### 2. `go test -tags integration ./internal/... -coverprofile=coverage.out -covermode=atomic -timeout 300s`
+
+The definitive **coverage run** — compiles integration test files alongside unit tests and records every line executed.
+
+| Flag | What it does |
+|------|--------------|
+| `-tags integration` | **Enable the `integration` build tag.** Files guarded with `//go:build integration` (e.g. `*_integration_test.go`, `internal/testhelper/postgres.go`) are compiled and included. Without this flag, those files are completely ignored by the Go compiler. |
+| `./internal/...` | Test only packages under `internal/` — excludes `cmd/` (no test files) so those lines don't skew the coverage total. |
+| `-coverprofile=coverage.out` | **Write raw coverage data to a file.** Records which source-code statements were executed during the run. This file is consumed by `go tool cover` in the next step. |
+| `-covermode=atomic` | **Thread-safe coverage counters.** Three modes exist: `set` (was a line hit — boolean), `count` (how many times), `atomic` (same as `count` but uses CPU atomic ops, preventing data races inside the coverage counters themselves). **Always use `atomic` when tests run in parallel.** |
+| `-timeout 300s` | **Global deadline.** Kills the run and marks it failed if it hasn't finished in 5 minutes. The default is 10 minutes (`10m0s`). Integration tests that start Docker containers need more time, so an explicit value prevents silent CI timeouts. |
+
+> **Requires Docker** (Testcontainers starts a `postgres:16-alpine` container).  
+> **Output:** produces `coverage.out` — a data file, not a human report. Use `go tool cover` to read it.
+
+---
+
+#### 3. `go tool cover -func=coverage.out`
+
+Reads the raw `coverage.out` file and prints a human-readable per-function breakdown.
+
+```text
+bible-crawler/internal/config/config.go:10:   Load            100.0%
+bible-crawler/internal/repository/...  :42:   UpsertBook      100.0%
+bible-crawler/internal/scraper/...     :87:   crawlChapters    92.3%
+...
+total:                                         (statements)     96.1%
 ```
 
-| Package | Coverage |
-|---------|----------|
-| `internal/config` | **100 %** |
-| `internal/repository` | **100 %** |
-| `internal/spec` | **100 %** |
-| `internal/scraper` | **96 %** |
-| `internal/utils` | **83 %** |
+| Subcommand option | What it does |
+|-------------------|--------------|
+| `-func=coverage.out` | Print per-function coverage percentages to stdout (text, best for terminal). |
+| `-html=coverage.out` | Generate an interactive HTML report — green = covered, red = not covered. |
+| `-html=coverage.out -o coverage.html` | Write the HTML to a named file instead of auto-opening a browser. |
 
-> **Note on remaining gaps:** three error-guard branches in `crawlChapters` and one in `Big5ToUTF8` are genuinely unreachable under normal operation (the underlying `bytes.NewReader` and lenient Big5 decoder never return errors; `goquery.NewDocumentFromReader` on a `strings.Reader` never errors; the `parseChapterContext` context is always valid when requests are queued). They exist as defensive fallbacks and are documented as such.
+> **Tip:** combine both for maximum insight:
+> ```bash
+> go tool cover -func=coverage.out            # quick terminal summary
+> go tool cover -html=coverage.out -o coverage.html && open coverage.html   # visual drill-down
+> ```
 
-### Integration Tests (requires Docker)
+---
 
-Integration tests spin up a real PostgreSQL 16 container automatically via [Testcontainers](https://testcontainers.com/). Docker must be running.
+### Complete `go test` Flag Reference
+
+#### Package patterns
 
 ```bash
-go test -tags integration ./... -timeout 300s
+go test ./...                   # all packages recursively (most common)
+go test ./internal/...          # only packages under internal/
+go test ./internal/repository   # one specific package
+go test .                       # current directory only
 ```
+
+#### Filtering tests by name
+
+```bash
+# -run accepts a regexp matched against test function (and sub-test) names
+go test -v -run TestRepository ./internal/repository      # all tests whose name contains "TestRepository"
+go test -v -run TestUpsertBook/success ./internal/...     # a specific sub-test
+go test -v -run ^TestLoad$ ./internal/spec                # exact match only
+```
+
+#### Execution control flags
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-v` | off | Verbose — print each test name and its elapsed time |
+| `-count=N` | 1 (cached) | Run each test N times; `-count=1` disables result caching |
+| `-parallel=N` | GOMAXPROCS | Max concurrent `t.Parallel()` tests per package |
+| `-timeout <dur>` | `10m0s` | Kill the run if it exceeds this duration (e.g. `300s`, `5m`) |
+| `-failfast` | off | Stop immediately after the first failure |
+| `-short` | off | Signal tests to skip slow paths (`testing.Short()`) |
+| `-race` | off | Enable Go's built-in data race detector (always use in CI) |
+
+#### Build tags
+
+```bash
+# Enable a build tag — compiles files with //go:build <tag>
+go test -tags integration ./...
+
+# Multiple tags (comma-separated)
+go test -tags "integration slow" ./...
+```
+
+#### Coverage flags
+
+| Flag | Description |
+|------|-------------|
+| `-cover` | Print a coverage % per package (no output file produced) |
+| `-coverprofile=<file>` | Write coverage data to file for later analysis |
+| `-covermode=set` | Boolean per statement — was it hit? |
+| `-covermode=count` | Integer per statement — how many times was it hit? |
+| `-covermode=atomic` | Like `count`, but thread-safe (**required for parallel tests**) |
+
+#### Benchmarks
+
+```bash
+go test -bench=. ./...                       # run all benchmarks
+go test -bench=BenchmarkParse -benchmem ./... # with memory allocation stats
+go test -bench=. -benchtime=5s ./...         # each benchmark runs for 5 s
+```
+
+#### Practical recipes
+
+```bash
+# Everyday check — all unit tests, no cache, verbose
+go test -count=1 -v ./...
+
+# Fastest possible check (skip anything marked testing.Short)
+go test -short ./...
+
+# CI-grade unit test run (race detector + coverage %, no Docker)
+go test -race -cover -count=1 ./...
+
+# Full coverage report — both tiers (needs Docker)
+go test -tags integration -race \
+  -coverprofile=coverage.out -covermode=atomic \
+  ./internal/... -timeout 300s
+go tool cover -func=coverage.out
+
+# Run exactly one test and see all its output
+go test -v -count=1 -run ^TestUpsertBook$ ./internal/repository
+
+# JSON output for CI dashboards / parsers
+go test -json ./... | jq '.Output' -r
+```
+
+---
+
+### Test Architecture
+
+| Layer | Build tag | Dependencies | Files |
+|-------|-----------|--------------|-------|
+| Unit | _(none)_ | `go-sqlmock`, `testify`, `httptest` | `*_test.go` (no integration suffix) |
+| Integration | `integration` | Docker + Testcontainers (PostgreSQL 16) | `*_integration_test.go`, `testhelper/postgres.go` |
 
 Integration tests additionally cover:
-- `internal/database` — `Connect` success path and exit-on-bad-URL subprocess test
-- `internal/repository` — full round-trip idempotency with a real database
-- `internal/scraper` — end-to-end `Run()` against a mock HTTP server and real database
-
-### Coverage Report
-
-```bash
-# Unit tests only
-go test ./internal/... -coverprofile=coverage.out -covermode=atomic
-go tool cover -func=coverage.out
-
-# Unit + integration combined
-go test -tags integration ./internal/... -coverprofile=coverage.out -covermode=atomic -timeout 300s
-go tool cover -func=coverage.out
-```
+- `internal/database` — `Connect` success path and `log.Fatalf` exit-on-bad-URL via subprocess test
+- `internal/repository` — full round-trip idempotency with a real PostgreSQL 16 database
+- `internal/scraper` — end-to-end `Run()` against a `httptest.NewServer` + real database
 
 ### Test Dependencies
 
 | Package | Purpose |
 |---------|---------|
-| `github.com/DATA-DOG/go-sqlmock` | SQL mock driver for unit tests |
+| `github.com/DATA-DOG/go-sqlmock` | SQL mock driver for unit tests (no real DB needed) |
 | `github.com/stretchr/testify` | Assertion helpers (`assert`, `require`) |
-| `github.com/testcontainers/testcontainers-go` | Docker-based integration test containers |
-| `github.com/testcontainers/testcontainers-go/modules/postgres` | PostgreSQL container module |
+| `github.com/testcontainers/testcontainers-go` | Spin up Docker containers inside tests |
+| `github.com/testcontainers/testcontainers-go/modules/postgres` | Pre-built PostgreSQL container module |
 
 ---
 
