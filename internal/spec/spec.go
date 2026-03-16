@@ -1,6 +1,6 @@
 // Package spec loads the two language-specific Bible JSON specification files
-// and exposes per-book, per-chapter verse counts. All three commands (crawler,
-// repair, spec-builder) use this package so verse counts are always data-driven
+// and exposes per-book, per-chapter verse counts. Both commands (crawler,
+// spec-builder) use this package so verse counts are always data-driven
 // with no hard-coded numbers in application logic.
 //
 // File layout:

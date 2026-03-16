@@ -9,11 +9,10 @@
   - **Stage 0 — Spec Builder**：爬取每個章節（兩語言），發現實際節數，寫入兩份 JSON 規格檔。首次建置或需更新規格時執行。
   - **Stage 1 — 書本設定**：直接從 JSON 規格寫入 66 卷書的中英文書名（不需 HTTP 請求）。
   - **Stage 2 — 章節與經文爬取**：非同步併發爬取 1,189 個章節 × 2 語言，依各語言的規格節數上限存入資料庫。
-- **版本節數差異處理（Versification-Aware）**：和合本與 BBE 在部分書卷（例如利未記、撒迦利亞書）的章節邊界不同。Spec 檔案記錄各語言的正確節數；修復工具（repair）對「一個語言有、另一個沒有」的節位自動寫入可讀的佔位說明文字。
+- **版本節數差異處理（Versification-Aware）**：和合本與 BBE 在部分書卷（例如利未記、撒迦利亞書）的章節邊界不同。Spec 檔案記錄各語言的正確節數，爬蟲自動依上限存入，不會寫入超出範圍的節。
 - **冪等寫入（Idempotent）**：所有 DB 寫入使用 `SELECT → INSERT → SELECT` 三步驟模式（對併發 goroutine 安全無 race condition）。重複執行爬蟲不會產生重複資料。
 - **編碼處理**：自動將中文頁面的 **Big5** 編碼轉換為 UTF-8 後再解析。
 - **完全可配置**：來源 URL、並行數、延遲與 HTTP 逾時皆透過 `.env` 設定，網站更新時無需重新編譯。
-- **修復工具（Repair Tool）**：主爬蟲完成後，執行 `cmd/repair` 補齊任何因暫時性 HTTP 錯誤而遺漏的章節與經文。
 
 ## 🛠 前置需求
 
@@ -118,20 +117,7 @@ Phase 2 complete.
 Bible Crawler finished successfully.
 ```
 
-### 步驟 6：執行修復工具（選擇性）
-
-如果因暫時性網路錯誤導致部分章節或經文遺漏，執行修復工具。它會查詢 DB 找出缺漏項目，只補抓那些頁面，並對版本差異節位寫入佔位說明文字。
-
-```bash
-go run cmd/repair/main.go
-```
-
-資料完整時的預期輸出：
-```text
-No missing chapters found — nothing to repair.
-```
-
-### 步驟 7：驗證資料（選擇性）
+### 步驟 6：驗證資料（選擇性）
 
 對資料庫執行專案根目錄的 `validation.sql`。查詢涵蓋三個層級（書、章、節）。第 1–3 節（缺漏偵測）應返回 **0 筆**結果；第 5 節（版本差異稽核）會列出預期的版本差異章節，這是正常現象。
 
@@ -142,10 +128,8 @@ bible-crawler/
 ├── cmd/
 │   ├── crawler/
 │   │   └── main.go           # 主爬蟲進入點（Stage 1 + 2）
-│   ├── spec-builder/
-│   │   └── main.go           # Stage 0：發現節數，寫入 JSON 規格檔
-│   └── repair/
-│       └── main.go           # 補齊遺漏章節/經文
+│   └── spec-builder/
+│       └── main.go           # Stage 0：發現節數，寫入 JSON 規格檔
 ├── internal/
 │   ├── config/               # 環境變數載入（所有 .env 欄位）
 │   ├── database/             # PostgreSQL 連線設定
@@ -163,7 +147,7 @@ bible-crawler/
 └── README_ZH.md
 ```
 
-> **注意**：已編譯的執行檔（`spec-builder`、`crawler`、`repair`）已列入 `.gitignore`，請勿提交至版本控制。請一律使用 `go run cmd/<name>/main.go` 執行。
+> **注意**：已編譯的執行檔（`spec-builder`、`crawler`）已列入 `.gitignore`，請勿提交至版本控制。請一律使用 `go run cmd/<name>/main.go` 執行。
 
 ## ⚠️ 常見問題排除
 
@@ -173,8 +157,8 @@ A：請檢查 `.env` 中的 `DATABASE_URL`，確認帳號密碼正確。
 **Q：出現 "dial tcp [::1]:5432: connect: connection refused" 錯誤**  
 A：請確認 PostgreSQL 服務已啟動並監聽 5432 連接埠。
 
-**Q：驗證 SQL 仍有缺漏資料**  
-A：修復工具已自動寫入版本差異佔位文字。若仍有缺漏，重新執行 `cmd/repair` 即可（完全冪等）。
+**Q：驗證 SQL 有缺漏資料**  
+A：`validation.sql` 第 5 節列出的版本差異章節為正常現象。第 1–3 節若有缺漏，請重新執行 `cmd/crawler`（完全冪等，不會產生重複資料）。
 
 **Q：資料出現亂碼（Mojibake）**  
 A：爬蟲已內建 Big5 轉 UTF-8 處理。請勿修改 `internal/utils/encoding.go` 的編碼邏輯。

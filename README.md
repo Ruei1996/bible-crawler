@@ -9,11 +9,10 @@ A high-performance, concurrent web crawler written in Go. It scrapes Bible conte
   - **Stage 0 — Spec Builder**: Crawls every chapter in both languages to discover actual verse counts, then writes the two JSON spec files. Run once (or whenever you need to refresh the spec).
   - **Stage 1 — Book Setup**: Writes all 66 book names from the JSON spec directly to the DB (no HTTP needed).
   - **Stage 2 — Chapter & Verse Crawl**: Asynchronously fetches 1,189 chapters × 2 languages and persists verses, bounded by each language's spec verse count.
-- **Versification-Aware**: Chinese 和合本 and English BBE differ in chapter boundary placement for several books (e.g. Leviticus, Zechariah). The spec files capture the correct verse count per language, and the repair tool writes readable placeholders where a verse position exists in one translation but not the other.
+- **Versification-Aware**: Chinese 和合本 and English BBE differ in chapter boundary placement for several books (e.g. Leviticus, Zechariah). The spec files capture the correct verse count per language so the crawler never writes out-of-range verse rows.
 - **Idempotent Writes**: Every DB write uses a `SELECT → INSERT → SELECT` pattern (race-condition safe for concurrent goroutines). Re-running the crawler never creates duplicates.
 - **Robust Encoding**: Automatically decodes **Big5** (Chinese pages) to UTF-8 before parsing.
 - **Fully Configurable**: Source URLs, concurrency, delays, and HTTP timeout are all set via `.env` — no recompile needed when the website changes.
-- **Repair Tool**: After the main crawl, run `cmd/repair` to patch any chapters missed due to transient HTTP errors.
 
 ## 🛠 Prerequisites
 
@@ -119,20 +118,7 @@ Phase 2 complete.
 Bible Crawler finished successfully.
 ```
 
-### Step 6: Repair Any Missed Data (optional)
-
-If transient network errors caused any chapters or verses to be skipped, run the repair tool. It queries the DB for missing entries and re-fetches only those pages. It also writes versification-difference placeholders for verse positions that genuinely do not exist in one translation.
-
-```bash
-go run cmd/repair/main.go
-```
-
-Expected output when everything is already complete:
-```text
-No missing chapters found — nothing to repair.
-```
-
-### Step 7: Validate (optional)
+### Step 6: Validate (optional)
 
 Run `validation.sql` (at the project root) against your PostgreSQL database. The queries check all three levels (books, chapters, verses). Results should return **0 rows** for Sections 1–3. Section 5 will list versification-difference chapters — that is expected and normal.
 
@@ -143,10 +129,8 @@ bible-crawler/
 ├── cmd/
 │   ├── crawler/
 │   │   └── main.go           # Main crawl entry point (Stages 1 + 2)
-│   ├── spec-builder/
-│   │   └── main.go           # Stage 0: discovers verse counts, writes JSON spec files
-│   └── repair/
-│       └── main.go           # Patches missed chapters/verses after a crawl
+│   └── spec-builder/
+│       └── main.go           # Stage 0: discovers verse counts, writes JSON spec files
 ├── internal/
 │   ├── config/               # Environment variable loader (all .env fields)
 │   ├── database/             # PostgreSQL connection setup
@@ -164,7 +148,7 @@ bible-crawler/
 └── README.md
 ```
 
-> **Note**: compiled binaries (`spec-builder`, `crawler`, `repair`) are listed in `.gitignore` and must not be committed. Always run via `go run cmd/<name>/main.go`.
+> **Note**: compiled binaries (`spec-builder`, `crawler`) are listed in `.gitignore` and must not be committed. Always run via `go run cmd/<name>/main.go`.
 
 ## ⚠️ Troubleshooting
 
@@ -174,8 +158,8 @@ A: Check `DATABASE_URL` in your `.env` file.
 **Q: "dial tcp [::1]:5432: connect: connection refused"**  
 A: Ensure PostgreSQL is running and listening on port 5432.
 
-**Q: Validation SQL still returns missing rows after repair.**  
-A: The repair tool writes placeholders for versification-difference verses automatically. If rows remain, re-run `cmd/repair` — it is fully idempotent.
+**Q: Validation SQL returns missing rows.**  
+A: Section 5 of `validation.sql` lists versification-difference chapters — these are expected. Sections 1–3 should all return 0 rows after a complete crawl. If they do not, re-run `cmd/crawler` (it is fully idempotent).
 
 **Q: Data looks garbled (mojibake).**  
 A: The crawler decodes Big5 pages before parsing. Do not modify `internal/utils/encoding.go`.

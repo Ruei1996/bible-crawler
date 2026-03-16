@@ -19,14 +19,14 @@ import (
 )
 
 // Config holds every runtime-configurable setting for the crawler system.
-// All three commands (spec-builder, crawler, repair) share this struct so
+// All two commands (spec-builder, crawler) share this struct so
 // that a single .env change propagates everywhere.
 type Config struct {
 // ── Application ──────────────────────────────────────────────────────────
 AppEnv string // "development" | "production"
 
 // ── Database ─────────────────────────────────────────────────────────────
-// Full PostgreSQL DSN. Only used by cmd/crawler and cmd/repair.
+// Full PostgreSQL DSN. Only used by cmd/crawler.
 DBUrl string
 
 // ── Source website ───────────────────────────────────────────────────────

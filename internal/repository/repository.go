@@ -29,8 +29,8 @@ const (
 )
 
 // BibleRepository centralizes all write/read operations for Bible tables.
-// Keeping write rules here ensures crawler and repair commands share the same
-// idempotent behavior.
+// Keeping write rules here ensures the crawler command shares a consistent
+// idempotent data-access layer.
 type BibleRepository struct {
 	DB *sqlx.DB
 }
