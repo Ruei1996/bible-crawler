@@ -323,6 +323,74 @@ Bible Crawler finished successfully.
 
 ### Step 6: Validate (optional)
 
+---
+
+## 🔄 Re-crawl Procedure (Protecting Existing Cross-Schema References)
+
+Use this procedure **instead of Step 5** whenever you need to TRUNCATE and re-populate the bibles schema in an environment that already contains data referencing `bibles.bible_sections` from other microservice schemas.
+
+> **Background**: Three tables store `bibles.bible_sections(id)` as a plain UUID without a declared FK constraint, so `TRUNCATE … CASCADE` does not reach them. After re-crawl every UUID changes, leaving these columns with stale references:
+>
+> | Table | Column |
+> |---|---|
+> | `activities.general_bibles` | `bible_id` |
+> | `activities.general_template_bibles` | `bible_id` |
+> | `devotions.devotion_bibles` | `bible_section_id` |
+
+### Step A — Backup (before TRUNCATE)
+
+```bash
+# Captures (book_sort, chapter_sort, section_sort) for every referenced verse,
+# then truncates all 6 bibles tables immediately after.
+go run cmd/migrate/main.go --phase=backup --truncate
+```
+
+> Omit `--truncate` if you prefer to run `TRUNCATE TABLE bibles.bible_books CASCADE;` manually.
+
+### Step B — Rebuild Spec (optional)
+
+Only needed if you want to refresh verse counts from the source website:
+
+```bash
+go run cmd/spec-builder/main.go
+```
+
+### Step C — Re-crawl
+
+```bash
+go run cmd/crawler/main.go
+```
+
+### Step D — Restore (after re-crawl)
+
+```bash
+# Updates the 3 cross-schema tables to point at the new UUIDs,
+# verifies orphan counts (should all be 0), then drops the backup table.
+go run cmd/migrate/main.go --phase=restore --cleanup
+```
+
+Expected output:
+```text
+Phase: restore — updating cross-schema bible references with new UUIDs...
+Restore complete:
+  activities.general_bibles updated:          N rows
+  activities.general_template_bibles updated: N rows
+  devotions.devotion_bibles updated:           N rows
+  Total:                                       N rows
+Verifying orphan counts...
+Orphan check:
+  activities.general_bibles:          0
+  activities.general_template_bibles: 0
+  devotions.devotion_bibles:           0
+All cross-schema references are valid.
+Cleaning up backup table...
+Backup table dropped.
+```
+
+> If `WARNING: N orphan reference(s) remain` appears, omit `--cleanup` and investigate before dropping the backup table.
+
+---
+
 Run `validation.sql` (at the project root) against your PostgreSQL database. The queries check all three levels (books, chapters, verses). Results should return **0 rows** for Sections 1–3. Section 5 will list versification-difference chapters — that is expected and normal.
 
 ## 📂 Project Structure
@@ -332,6 +400,8 @@ bible-crawler/
 ├── cmd/
 │   ├── crawler/
 │   │   └── main.go           # Main crawl entry point (Stages 1 + 2)
+│   ├── migrate/
+│   │   └── main.go           # Cross-schema UUID backup/restore (--phase=backup|restore)
 │   └── spec-builder/
 │       └── main.go           # Stage 0: discovers verse counts, writes JSON spec files
 ├── internal/
@@ -339,6 +409,8 @@ bible-crawler/
 │   │   └── config_test.go    # Unit tests — 100 % coverage
 │   ├── database/             # PostgreSQL connection setup
 │   │   └── database_test.go  # Integration tests (build tag: integration)
+│   ├── migration/            # Backup/restore logic for cross-schema bible refs
+│   │   └── migration_test.go # Unit tests with go-sqlmock — 100 % coverage
 │   ├── model/                # Go structs for DB tables
 │   ├── repository/           # Idempotent data-access layer (all SQL)
 │   │   ├── repository_test.go             # Unit tests with go-sqlmock — 100 % coverage

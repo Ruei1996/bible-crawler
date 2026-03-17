@@ -322,6 +322,74 @@ Bible Crawler finished successfully.
 
 ### 步驟 6：驗證資料（選擇性）
 
+---
+
+## 🔄 重新爬取流程（保護跨 Schema 的聖經引用資料）
+
+當需要在**已有其他微服務資料**引用 `bibles.bible_sections` 的環境下執行 TRUNCATE + 重跑爬蟲時，使用此流程取代步驟 5。
+
+> **背景說明**：以下三張表以純 UUID 欄位儲存 `bibles.bible_sections(id)`，且**未宣告 FK constraint**，因此 `TRUNCATE … CASCADE` 不會自動清理它們。重跑爬蟲後所有 UUID 都會改變，這些欄位將變成孤兒資料：
+>
+> | 資料表 | 欄位 |
+> |---|---|
+> | `activities.general_bibles` | `bible_id` |
+> | `activities.general_template_bibles` | `bible_id` |
+> | `devotions.devotion_bibles` | `bible_section_id` |
+
+### 步驟 A — 備份（TRUNCATE 前）
+
+```bash
+# 記錄每個被引用節的穩定座標 (book_sort, chapter_sort, section_sort)，
+# 備份完成後立即 TRUNCATE 全部 6 張 bibles 資料表。
+go run cmd/migrate/main.go --phase=backup --truncate
+```
+
+> 若偏好手動執行 TRUNCATE，可省略 `--truncate`，改為手動執行 `TRUNCATE TABLE bibles.bible_books CASCADE;`。
+
+### 步驟 B — 重建 Spec（選擇性）
+
+只有需要從來源網站重新取得最新節數時才執行：
+
+```bash
+go run cmd/spec-builder/main.go
+```
+
+### 步驟 C — 重新爬取
+
+```bash
+go run cmd/crawler/main.go
+```
+
+### 步驟 D — 還原（爬蟲完成後）
+
+```bash
+# 將 3 張跨 schema 資料表更新為新的 UUID，
+# 驗證孤兒數量（應全為 0），然後刪除備份表。
+go run cmd/migrate/main.go --phase=restore --cleanup
+```
+
+預期輸出：
+```text
+Phase: restore — updating cross-schema bible references with new UUIDs...
+Restore complete:
+  activities.general_bibles updated:          N rows
+  activities.general_template_bibles updated: N rows
+  devotions.devotion_bibles updated:           N rows
+  Total:                                       N rows
+Verifying orphan counts...
+Orphan check:
+  activities.general_bibles:          0
+  activities.general_template_bibles: 0
+  devotions.devotion_bibles:           0
+All cross-schema references are valid.
+Cleaning up backup table...
+Backup table dropped.
+```
+
+> 若出現 `WARNING: N orphan reference(s) remain`，請省略 `--cleanup`，先調查原因後再刪除備份表。
+
+---
+
 對資料庫執行專案根目錄的 `validation.sql`。查詢涵蓋三個層級（書、章、節）。第 1–3 節（缺漏偵測）應返回 **0 筆**結果；第 5 節（版本差異稽核）會列出預期的版本差異章節，這是正常現象。
 
 ## 📂 專案結構說明
@@ -331,6 +399,8 @@ bible-crawler/
 ├── cmd/
 │   ├── crawler/
 │   │   └── main.go           # 主爬蟲進入點（Stage 1 + 2）
+│   ├── migrate/
+│   │   └── main.go           # 跨 schema UUID 備份/還原（--phase=backup|restore）
 │   └── spec-builder/
 │       └── main.go           # Stage 0：發現節數，寫入 JSON 規格檔
 ├── internal/
@@ -338,6 +408,8 @@ bible-crawler/
 │   │   └── config_test.go    # 單元測試 — 100 % 覆蓋率
 │   ├── database/             # PostgreSQL 連線設定
 │   │   └── database_test.go  # 整合測試（build tag: integration）
+│   ├── migration/            # 跨 schema 聖經引用備份/還原邏輯
+│   │   └── migration_test.go # 單元測試（go-sqlmock）— 100 % 覆蓋率
 │   ├── model/                # 對應資料庫的 Go Struct
 │   ├── repository/           # 冪等資料存取層（所有 SQL）
 │   │   ├── repository_test.go             # 單元測試（go-sqlmock）— 100 % 覆蓋率
