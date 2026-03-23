@@ -1,11 +1,14 @@
 # Bible Crawler
 
-A high-performance, concurrent web crawler written in Go. It scrapes Bible content (Chinese Union Version 和合本 & Basic English Version BBE) from `springbible.fhl.net` and populates a PostgreSQL database with a strict, normalized schema.
+A Go-based Bible crawler that populates a PostgreSQL database with a strict, normalized schema. It supports **two data sources** — the original HTML scraper (`springbible.fhl.net`) and the [YouVersion Platform REST API](https://api.youversion.com/v1) — writing to the exact same schema so both approaches are fully interchangeable.
 
 ## 🌟 Features
 
-- **Spec-Driven Crawling**: Per-language verse counts are sourced from `bible_books_zh.json` / `bible_books_en.json`. The crawler never hard-codes verse numbers — all limits come from the JSON spec files.
-- **Three-Stage Workflow**:
+- **Dual Data-Source Support**:
+  - **HTML Scraper** (`cmd/crawler`): crawls Chinese Union Version (和合本) and BBE from `springbible.fhl.net`. Spec-driven — verse counts come from JSON spec files.
+  - **YouVersion API Crawler** (`cmd/youversion-crawler`): fetches Bible content via the [YouVersion Platform API](https://developers.youversion.com/api/bibles). No spec files needed — all structure is derived from the API itself. Uses NIV 2011 (ID 111) for English and CCB 当代圣经 (ID 36) for Chinese by default; configure `YOUVERSION_CHINESE_BIBLE_ID=46` once a publisher license for 新標點和合本 (CUNP) is approved.
+- **Spec-Driven Crawling** (HTML path): Per-language verse counts are sourced from `bible_books_zh.json` / `bible_books_en.json`. The crawler never hard-codes verse numbers — all limits come from the JSON spec files.
+- **Three-Stage Workflow** (HTML path):
   - **Stage 0 — Spec Builder**: Crawls every chapter in both languages to discover actual verse counts, then writes the two JSON spec files. Run once (or whenever you need to refresh the spec).
   - **Stage 1 — Book Setup**: Writes all book names from the JSON spec directly to the DB (no HTTP needed). The number of books is determined entirely by the spec files generated in Stage 0.
   - **Stage 2 — Chapter & Verse Crawl**: Asynchronously fetches 1,189 chapters × 2 languages and persists verses, bounded by each language's spec verse count.
@@ -35,6 +38,7 @@ The project ships with a full two-tier test suite covering every internal packag
 | `internal/config` | **100 %** | unit |
 | `internal/repository` | **100 %** | unit + integration |
 | `internal/spec` | **100 %** | unit |
+| `internal/youversion` | **100 %** | unit |
 | `internal/scraper` | **96 %** | unit + integration |
 | `internal/utils` | **83 %** | unit |
 
@@ -262,7 +266,7 @@ Copy `.env.example` to `.env` and fill in your credentials and settings:
 APP_ENV=development
 DATABASE_URL=postgres://username:password@localhost:5432/topchurch_dev?sslmode=disable
 
-# ── Source website ────────────────────────────────────────────────────────────
+# ── Source website (HTML scraper only) ────────────────────────────────────────
 # Update these three values if the website migrates or you switch Bible translations.
 # SOURCE_ZH_URL and SOURCE_EN_URL must each contain one %d placeholder for the
 # global chapter index (1-based, sequential across all books).
@@ -270,15 +274,22 @@ SOURCE_DOMAIN=springbible.fhl.net
 SOURCE_ZH_URL=https://springbible.fhl.net/Bible2/cgic201/read201.cgi?na=0&chap=%d&ft=0
 SOURCE_EN_URL=https://springbible.fhl.net/Bible2/cgic201/read201.cgi?na=0&chap=%d&ver=bbe
 
-# ── Crawler tuning ────────────────────────────────────────────────────────────
+# ── Crawler tuning (HTML scraper only) ────────────────────────────────────────
 # Lower CRAWLER_PARALLELISM or raise *_DELAY_MS if the server starts throttling.
 CRAWLER_PARALLELISM=5
 CRAWLER_DELAY_MS=200
 CRAWLER_RANDOM_DELAY_MS=100
 HTTP_TIMEOUT_SEC=30
-```
 
-> **Tip — Changing the source website**: if `springbible.fhl.net` ever moves or you want to target a different Chinese / English Bible translation, update `SOURCE_DOMAIN`, `SOURCE_ZH_URL`, and `SOURCE_EN_URL` in `.env`, then re-run `cmd/spec-builder` to regenerate the JSON spec files before running the crawler.
+# ── YouVersion Platform API (youversion-crawler only) ─────────────────────────
+# Obtain an app key at https://platform.youversion.com
+YOUVERSION_API_KEY=your-app-key-here
+YOUVERSION_BASE_URL=https://api.youversion.com/v1   # optional, this is the default
+# Default Bible IDs: 111 = NIV 2011 (English), 36 = CCB 当代圣经 (Chinese).
+# Set YOUVERSION_CHINESE_BIBLE_ID=46 once a publisher license for 新標點和合本 is approved.
+YOUVERSION_ENGLISH_BIBLE_ID=111
+YOUVERSION_CHINESE_BIBLE_ID=36
+```
 
 ### Step 4: Build Spec Files (first time, or to refresh)
 
@@ -304,7 +315,13 @@ Done. Written:
 
 > After this step, `bible_books_zh.json` and `bible_books_en.json` will have **different** verse counts for chapters where the two translations draw boundaries differently.
 
-### Step 5: Run the Main Crawler
+### Step 5: Run the Crawler
+
+Choose **one** of the two crawler approaches:
+
+#### Option A — HTML Scraper (原 springbible.fhl.net)
+
+Requires Step 4 (spec files must already exist). Fetches content from the HTML website.
 
 ```bash
 go run cmd/crawler/main.go
@@ -320,6 +337,33 @@ Phase 2: Crawling Chapters...
 Phase 2 complete.
 Bible Crawler finished successfully.
 ```
+
+#### Option B — YouVersion API Crawler ✨
+
+No spec files needed. Fetches content directly from the YouVersion REST API.
+Requires `YOUVERSION_API_KEY` (and optionally `YOUVERSION_CHINESE_BIBLE_ID` / `YOUVERSION_ENGLISH_BIBLE_ID`) to be set in `.env`.
+
+```bash
+go run cmd/youversion-crawler/main.go
+```
+
+Expected output:
+```text
+Connected to database successfully
+Starting YouVersion Bible Crawler...
+YouVersion Scraper: starting...
+Phase 1: fetching book list for English Bible (ID 111)...
+Phase 1: fetching book list for Chinese Bible (ID 36)...
+Phase 1: 66/66 books ready.
+Phase 2: crawling verses...
+Phase 2: language=english bibleID=111
+Phase 2: language=chinese bibleID=36
+Phase 2: done.
+YouVersion Scraper: done.
+YouVersion Crawler finished successfully.
+```
+
+> **Bible version note**: By default, Option B uses NIV 2011 (ID 111) for English and CCB 当代圣经 (ID 36) for Chinese — both freely accessible with a YouVersion Platform app key. To use 新標點和合本 (ID 46, traditional Chinese), apply for a publisher license at `https://platform.youversion.com/bibles`, then set `YOUVERSION_CHINESE_BIBLE_ID=46` in `.env`.
 
 ### Step 6: Validate (optional)
 

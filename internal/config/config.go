@@ -50,6 +50,23 @@ CrawlerParallelism   int // max concurrent outbound HTTP requests
 CrawlerDelayMS       int // base delay between requests (milliseconds)
 CrawlerRandomDelayMS int // additional random jitter per request (ms)
 HTTPTimeoutSec       int // per-request HTTP timeout (seconds)
+
+// ── YouVersion API ───────────────────────────────────────────────────────
+// Settings for cmd/youversion-fetcher and cmd/youversion-crawler, both of
+// which call the YouVersion Platform API.
+//
+// YouVersionAPIKey      — app key sent as the x-yvp-app-key request header.
+//                         Required; obtain from https://platform.youversion.com
+// YouVersionBaseURL     — base URL for the YouVersion API (without trailing slash).
+// YouVersionChineseBibleID — YouVersion Bible ID for the Chinese translation.
+//                         Default 36 = CCB (当代圣经, simplified, freely accessible).
+//                         Switch to 46 (新標點和合本) after obtaining a publisher license.
+// YouVersionEnglishBibleID — YouVersion Bible ID for the English translation.
+//                         Default 111 = NIV 2011 (freely accessible).
+YouVersionAPIKey         string
+YouVersionBaseURL        string
+YouVersionChineseBibleID int
+YouVersionEnglishBibleID int
 }
 
 // Load reads configuration from a .env file (if present) then from the process
@@ -76,6 +93,11 @@ CrawlerParallelism:   getEnvInt("CRAWLER_PARALLELISM", 5),
 CrawlerDelayMS:       getEnvInt("CRAWLER_DELAY_MS", 200),
 CrawlerRandomDelayMS: getEnvInt("CRAWLER_RANDOM_DELAY_MS", 100),
 HTTPTimeoutSec:       getEnvInt("HTTP_TIMEOUT_SEC", 30),
+
+YouVersionAPIKey:         getEnv("YOUVERSION_API_KEY", ""),
+YouVersionBaseURL:        getEnv("YOUVERSION_BASE_URL", "https://api.youversion.com/v1"),
+YouVersionChineseBibleID: getEnvInt("YOUVERSION_CHINESE_BIBLE_ID", 36),
+YouVersionEnglishBibleID: getEnvInt("YOUVERSION_ENGLISH_BIBLE_ID", 111),
 }
 }
 

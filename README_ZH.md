@@ -1,11 +1,15 @@
 # Bible Crawler（聖經爬蟲系統）
 
-這是一個高效能、支援併發的 Go 語言網頁爬蟲。專門從 `springbible.fhl.net` 抓取聖經資料（和合本中文版與 Basic English Version BBE），並儲存到結構嚴謹的 PostgreSQL 資料庫中。
+這是一個 Go 語言聖經爬蟲，將聖經內容存入結構嚴謹的 PostgreSQL 資料庫。支援**兩種資料來源**，寫入完全相同的資料表 Schema，可互換使用：
+
+- **HTML 爬蟲**（`cmd/crawler`）：從 `springbible.fhl.net` 抓取和合本與 BBE。
+- **YouVersion API 爬蟲**（`cmd/youversion-crawler`）：透過 [YouVersion Platform REST API](https://developers.youversion.com/api/bibles) 取得聖經內容。無需 Spec 規格檔，所有結構直接從 API 取得。預設使用 NIV 2011（ID 111）英文版及 CCB 当代圣经（ID 36）中文版；待取得授權後可設定 `YOUVERSION_CHINESE_BIBLE_ID=46` 切換至新標點和合本。
 
 ## 🌟 功能特色
 
-- **Spec 驅動爬取**：各章節的實際節數從 `bible_books_zh.json`（和合本）與 `bible_books_en.json`（BBE）讀取，程式碼零硬寫數字，完全由 JSON 規格控制。
-- **三階段工作流程**：
+- **雙資料來源支援**：HTML 爬蟲與 YouVersion API 爬蟲輸出至相同 Schema，資料格式完全一致。
+- **Spec 驅動爬取**（HTML 路徑）：各章節的實際節數從 `bible_books_zh.json`（和合本）與 `bible_books_en.json`（BBE）讀取，程式碼零硬寫數字，完全由 JSON 規格控制。
+- **三階段工作流程**（HTML 路徑）:
   - **Stage 0 — Spec Builder**：爬取每個章節（兩語言），發現實際節數，寫入兩份 JSON 規格檔。首次建置或需更新規格時執行。
   - **Stage 1 — 書本設定**：直接從 JSON 規格寫入所有書卷的中英文書名（不需 HTTP 請求）。書卷總數完全由 Stage 0 產生的規格檔決定。
   - **Stage 2 — 章節與經文爬取**：非同步併發爬取 1,189 個章節 × 2 語言，依各語言的規格節數上限存入資料庫。
@@ -35,6 +39,7 @@
 | `internal/config` | **100 %** | 單元測試 |
 | `internal/repository` | **100 %** | 單元 + 整合測試 |
 | `internal/spec` | **100 %** | 單元測試 |
+| `internal/youversion` | **100 %** | 單元測試 |
 | `internal/scraper` | **96 %** | 單元 + 整合測試 |
 | `internal/utils` | **83 %** | 單元測試 |
 
@@ -262,22 +267,29 @@ go mod tidy
 APP_ENV=development
 DATABASE_URL=postgres://username:password@localhost:5432/topchurch_dev?sslmode=disable
 
-# ── 來源網站 ──────────────────────────────────────────────────────────────────
+# ── 來源網站（HTML 爬蟲專用）──────────────────────────────────────────────────
 # 若網站搬遷或更換聖經翻譯版本，更新以下三個值即可，無需重新編譯程式碼。
 # SOURCE_ZH_URL 與 SOURCE_EN_URL 各需包含一個 %d 佔位符，代表全域章節索引。
 SOURCE_DOMAIN=springbible.fhl.net
 SOURCE_ZH_URL=https://springbible.fhl.net/Bible2/cgic201/read201.cgi?na=0&chap=%d&ft=0
 SOURCE_EN_URL=https://springbible.fhl.net/Bible2/cgic201/read201.cgi?na=0&chap=%d&ver=bbe
 
-# ── 爬蟲調校 ──────────────────────────────────────────────────────────────────
+# ── 爬蟲調校（HTML 爬蟲專用）─────────────────────────────────────────────────
 # 如遭伺服器限速，可降低 CRAWLER_PARALLELISM 或提高延遲值。
 CRAWLER_PARALLELISM=5
 CRAWLER_DELAY_MS=200
 CRAWLER_RANDOM_DELAY_MS=100
 HTTP_TIMEOUT_SEC=30
-```
 
-> **提示 — 更換來源網站**：若 `springbible.fhl.net` 搬遷，或需改用其他中文/英文聖經翻譯，只需在 `.env` 更新 `SOURCE_DOMAIN`、`SOURCE_ZH_URL`、`SOURCE_EN_URL`，然後重新執行 `cmd/spec-builder` 重新產生規格 JSON，再執行主爬蟲即可。
+# ── YouVersion Platform API（youversion-crawler 專用）────────────────────────
+# 在 https://platform.youversion.com 申請 App Key
+YOUVERSION_API_KEY=your-app-key-here
+YOUVERSION_BASE_URL=https://api.youversion.com/v1   # 選填，此為預設值
+# 預設 Bible ID：111 = NIV 2011（英文），36 = CCB 当代圣经（中文）
+# 取得 新標點和合本（ID 46）授權後，可改為 YOUVERSION_CHINESE_BIBLE_ID=46
+YOUVERSION_ENGLISH_BIBLE_ID=111
+YOUVERSION_CHINESE_BIBLE_ID=36
+```
 
 ### 步驟 4：建置 Spec 規格檔（首次或需更新時執行）
 
@@ -303,7 +315,13 @@ Done. Written:
 
 > 執行完成後，`bible_books_zh.json` 與 `bible_books_en.json` 在部分書卷的章節節數將**不同**，正確反映兩個翻譯版本的版本差異。
 
-### 步驟 5：執行主爬蟲
+### 步驟 5：執行爬蟲
+
+請選擇**其中一種**爬蟲方式：
+
+#### 選項 A — HTML 爬蟲（原 springbible.fhl.net）
+
+需先完成步驟 4（規格檔必須存在）。
 
 ```bash
 go run cmd/crawler/main.go
@@ -319,6 +337,33 @@ Phase 2: Crawling Chapters...
 Phase 2 complete.
 Bible Crawler finished successfully.
 ```
+
+#### 選項 B — YouVersion API 爬蟲 ✨
+
+**無需規格檔**，直接透過 YouVersion REST API 取得聖經內容。
+需在 `.env` 設定 `YOUVERSION_API_KEY`（以及選擇性的 Bible ID 設定）。
+
+```bash
+go run cmd/youversion-crawler/main.go
+```
+
+預期輸出：
+```text
+Connected to database successfully
+Starting YouVersion Bible Crawler...
+YouVersion Scraper: starting...
+Phase 1: fetching book list for English Bible (ID 111)...
+Phase 1: fetching book list for Chinese Bible (ID 36)...
+Phase 1: 66/66 books ready.
+Phase 2: crawling verses...
+Phase 2: language=english bibleID=111
+Phase 2: language=chinese bibleID=36
+Phase 2: done.
+YouVersion Scraper: done.
+YouVersion Crawler finished successfully.
+```
+
+> **聖經版本說明**：選項 B 預設使用 NIV 2011（ID 111）英文版與 CCB 当代圣经（ID 36）中文版，兩者皆可免費透過 YouVersion Platform App Key 存取。若需使用新標點和合本（ID 46，繁體中文），請至 `https://platform.youversion.com/bibles` 申請出版商授權，通過後在 `.env` 設定 `YOUVERSION_CHINESE_BIBLE_ID=46` 即可。
 
 ### 步驟 6：驗證資料（選擇性）
 
