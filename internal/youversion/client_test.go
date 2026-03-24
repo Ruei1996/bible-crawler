@@ -6,6 +6,7 @@ package youversion
 // every branch of the internal get() helper, including the ReadAll error path.
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -95,7 +96,7 @@ func TestGet_NewRequestError(t *testing.T) {
 	// An invalid URL scheme causes http.NewRequest to fail.
 	c := NewClient("://invalid-url", "key", 5)
 	var result BiblesResponse
-	err := c.get("/test", &result)
+	err := c.get(context.Background(), "/test", &result)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "build request")
 }
@@ -106,7 +107,7 @@ func TestGet_DoError(t *testing.T) {
 	srv.Close()
 	c := newTestClient(srv.URL)
 	var result BiblesResponse
-	err := c.get("/test", &result)
+	err := c.get(context.Background(), "/test", &result)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "GET")
 }
@@ -116,7 +117,7 @@ func TestGet_ReadBodyError(t *testing.T) {
 	c := newTestClient("http://unused.example.com")
 	c.httpClient = &http.Client{Transport: errBodyTransport{}}
 	var result BiblesResponse
-	err := c.get("/test", &result)
+	err := c.get(context.Background(), "/test", &result)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "read body")
 }
@@ -125,7 +126,7 @@ func TestGet_NonOKStatus(t *testing.T) {
 	srv := rawServer(t, http.StatusForbidden, `{"message":"Access denied"}`)
 	c := newTestClient(srv.URL)
 	var result BiblesResponse
-	err := c.get("/bibles/46", &result)
+	err := c.get(context.Background(), "/bibles/46", &result)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "403")
 }
@@ -134,7 +135,7 @@ func TestGet_InvalidJSON(t *testing.T) {
 	srv := rawServer(t, http.StatusOK, `not-valid-json`)
 	c := newTestClient(srv.URL)
 	var result BiblesResponse
-	err := c.get("/test", &result)
+	err := c.get(context.Background(), "/test", &result)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "decode JSON")
 }
@@ -144,7 +145,7 @@ func TestGet_Success(t *testing.T) {
 	srv := jsonServer(t, http.StatusOK, resp)
 	c := newTestClient(srv.URL)
 	var result BiblesResponse
-	err := c.get("/bibles?language_ranges%5B%5D=en", &result)
+	err := c.get(context.Background(), "/bibles?language_ranges%5B%5D=en", &result)
 	require.NoError(t, err)
 	assert.Len(t, result.Data, 1)
 	assert.Equal(t, "Test Bible", result.Data[0].Title)
@@ -158,7 +159,7 @@ func TestGetBibles_Success(t *testing.T) {
 	payload := BiblesResponse{Data: []BibleVersion{{ID: 111, Abbreviation: "NIV11"}}}
 	srv := jsonServer(t, http.StatusOK, payload)
 	c := newTestClient(srv.URL)
-	result, err := c.GetBibles("en")
+	result, err := c.GetBibles(context.Background(), "en")
 	require.NoError(t, err)
 	require.Len(t, result.Data, 1)
 	assert.Equal(t, "NIV11", result.Data[0].Abbreviation)
@@ -167,7 +168,7 @@ func TestGetBibles_Success(t *testing.T) {
 func TestGetBibles_Error(t *testing.T) {
 	srv := rawServer(t, http.StatusInternalServerError, `{"message":"error"}`)
 	c := newTestClient(srv.URL)
-	_, err := c.GetBibles("en")
+	_, err := c.GetBibles(context.Background(), "en")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "GetBibles")
 }
@@ -180,7 +181,7 @@ func TestGetBible_Success(t *testing.T) {
 	payload := BibleVersion{ID: 111, Title: "New International Version 2011"}
 	srv := jsonServer(t, http.StatusOK, payload)
 	c := newTestClient(srv.URL)
-	result, err := c.GetBible(111)
+	result, err := c.GetBible(context.Background(), 111)
 	require.NoError(t, err)
 	assert.Equal(t, "New International Version 2011", result.Title)
 }
@@ -188,7 +189,7 @@ func TestGetBible_Success(t *testing.T) {
 func TestGetBible_Error(t *testing.T) {
 	srv := rawServer(t, http.StatusNotFound, `{"message":"Not Found"}`)
 	c := newTestClient(srv.URL)
-	_, err := c.GetBible(9999)
+	_, err := c.GetBible(context.Background(), 9999)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "GetBible")
 }
@@ -201,7 +202,7 @@ func TestGetBooks_Success(t *testing.T) {
 	payload := BooksResponse{Data: []BookData{{ID: "GEN", Title: "Genesis"}}}
 	srv := jsonServer(t, http.StatusOK, payload)
 	c := newTestClient(srv.URL)
-	result, err := c.GetBooks(111)
+	result, err := c.GetBooks(context.Background(), 111)
 	require.NoError(t, err)
 	require.Len(t, result.Data, 1)
 	assert.Equal(t, "GEN", result.Data[0].ID)
@@ -210,7 +211,7 @@ func TestGetBooks_Success(t *testing.T) {
 func TestGetBooks_Error(t *testing.T) {
 	srv := rawServer(t, http.StatusUnauthorized, `{"message":"Unauthorized"}`)
 	c := newTestClient(srv.URL)
-	_, err := c.GetBooks(111)
+	_, err := c.GetBooks(context.Background(), 111)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "GetBooks")
 }
@@ -223,7 +224,7 @@ func TestGetBook_Success(t *testing.T) {
 	payload := BookData{ID: "GEN", Title: "Genesis", FullTitle: "Genesis"}
 	srv := jsonServer(t, http.StatusOK, payload)
 	c := newTestClient(srv.URL)
-	result, err := c.GetBook(111, "GEN")
+	result, err := c.GetBook(context.Background(), 111, "GEN")
 	require.NoError(t, err)
 	assert.Equal(t, "GEN", result.ID)
 }
@@ -231,7 +232,7 @@ func TestGetBook_Success(t *testing.T) {
 func TestGetBook_Error(t *testing.T) {
 	srv := rawServer(t, http.StatusNotFound, `{"message":"Not Found"}`)
 	c := newTestClient(srv.URL)
-	_, err := c.GetBook(111, "INVALID")
+	_, err := c.GetBook(context.Background(), 111, "INVALID")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "GetBook")
 }
@@ -244,7 +245,7 @@ func TestGetChapter_Success(t *testing.T) {
 	payload := ChapterData{ID: "1", PassageID: "GEN.1", Title: "1"}
 	srv := jsonServer(t, http.StatusOK, payload)
 	c := newTestClient(srv.URL)
-	result, err := c.GetChapter(111, "GEN", 1)
+	result, err := c.GetChapter(context.Background(), 111, "GEN", 1)
 	require.NoError(t, err)
 	assert.Equal(t, "GEN.1", result.PassageID)
 }
@@ -252,7 +253,7 @@ func TestGetChapter_Success(t *testing.T) {
 func TestGetChapter_Error(t *testing.T) {
 	srv := rawServer(t, http.StatusNotFound, `{"message":"Not Found"}`)
 	c := newTestClient(srv.URL)
-	_, err := c.GetChapter(111, "GEN", 99)
+	_, err := c.GetChapter(context.Background(), 111, "GEN", 99)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "GetChapter")
 }
@@ -265,7 +266,7 @@ func TestGetVerse_Success(t *testing.T) {
 	payload := VerseData{ID: "1", PassageID: "GEN.1.1", Title: "1"}
 	srv := jsonServer(t, http.StatusOK, payload)
 	c := newTestClient(srv.URL)
-	result, err := c.GetVerse(111, "GEN", 1, 1)
+	result, err := c.GetVerse(context.Background(), 111, "GEN", 1, 1)
 	require.NoError(t, err)
 	assert.Equal(t, "GEN.1.1", result.PassageID)
 }
@@ -273,7 +274,7 @@ func TestGetVerse_Success(t *testing.T) {
 func TestGetVerse_Error(t *testing.T) {
 	srv := rawServer(t, http.StatusNotFound, `{"message":"Not Found"}`)
 	c := newTestClient(srv.URL)
-	_, err := c.GetVerse(111, "GEN", 1, 999)
+	_, err := c.GetVerse(context.Background(), 111, "GEN", 1, 999)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "GetVerse")
 }
@@ -286,7 +287,7 @@ func TestGetVOTD_Success(t *testing.T) {
 	payload := VOTDResponse{Data: []VOTDEntry{{Day: 1, PassageID: "ISA.43.18-19"}}}
 	srv := jsonServer(t, http.StatusOK, payload)
 	c := newTestClient(srv.URL)
-	result, err := c.GetVOTD()
+	result, err := c.GetVOTD(context.Background())
 	require.NoError(t, err)
 	require.Len(t, result.Data, 1)
 	assert.Equal(t, "ISA.43.18-19", result.Data[0].PassageID)
@@ -295,7 +296,7 @@ func TestGetVOTD_Success(t *testing.T) {
 func TestGetVOTD_Error(t *testing.T) {
 	srv := rawServer(t, http.StatusInternalServerError, `{"message":"error"}`)
 	c := newTestClient(srv.URL)
-	_, err := c.GetVOTD()
+	_, err := c.GetVOTD(context.Background())
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "GetVOTD")
 }
@@ -312,7 +313,7 @@ func TestGetPassage_Success(t *testing.T) {
 	}
 	srv := jsonServer(t, http.StatusOK, payload)
 	c := newTestClient(srv.URL)
-	result, err := c.GetPassage(111, "GEN.1.1")
+	result, err := c.GetPassage(context.Background(), 111, "GEN.1.1")
 	require.NoError(t, err)
 	assert.Equal(t, "GEN.1.1", result.ID)
 	assert.Contains(t, result.Content, "beginning")
@@ -322,7 +323,7 @@ func TestGetPassage_Error_Forbidden(t *testing.T) {
 	// Simulates the 403 returned for licensed Bibles without access.
 	srv := rawServer(t, http.StatusForbidden, `{"message":"Access denied for 46"}`)
 	c := newTestClient(srv.URL)
-	_, err := c.GetPassage(46, "GEN.1.1")
+	_, err := c.GetPassage(context.Background(), 46, "GEN.1.1")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "GetPassage")
 }
@@ -330,7 +331,7 @@ func TestGetPassage_Error_Forbidden(t *testing.T) {
 func TestGetPassage_Error_NotFound(t *testing.T) {
 	srv := rawServer(t, http.StatusNotFound, `{"message":"Not Found"}`)
 	c := newTestClient(srv.URL)
-	_, err := c.GetPassage(111, "INVALID.99.99")
+	_, err := c.GetPassage(context.Background(), 111, "INVALID.99.99")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "GetPassage")
 }

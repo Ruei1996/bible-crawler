@@ -65,21 +65,22 @@ HTTPTimeoutSec       int // per-request HTTP timeout (seconds)
 //                         Default 111 = NIV 2011 (freely accessible).
 //
 // ── YouVersion parallel-crawl tuning ─────────────────────────────────────
-// These settings control the fault-tolerant parallel crawler.
-// They are ignored when YOUVERSION_CHECKPOINT_FILE is empty (sequential mode).
+// These settings control the fault-tolerant parallel crawler and are all
+// required — cmd/youversion-crawler will fatal if Checkpoint is not set.
 //
 // YouVersionWorkers      — number of parallel worker goroutines (default 3).
-//                          Increase cautiously; higher values risk rate-limiting.
+//                          Should be ≥ YouVersionRateLimitRPS to keep all
+//                          workers busy; higher values risk rate-limiting.
 // YouVersionRateLimitRPS — token-bucket rate limit: maximum requests per second
 //                          across all workers combined (default 2.0).
 // YouVersionMaxRetries   — maximum retry attempts per verse on transient errors
 //                          (default 5). 404 responses are never retried.
 // YouVersionRetryBaseMS  — initial backoff interval in milliseconds; doubles on
 //                          each retry with ±25 % jitter (default 1000).
-// YouVersionCheckpointFile — path to the JSONL checkpoint file. Each line
-//                          stores one fetched verse and serves as both the
-//                          progress log and the input for cmd/youversion-importer.
-//                          Leave empty to use the original sequential DB-write mode.
+// YouVersionCheckpointFile — path to the JSONL checkpoint file (required).
+//                          Each line stores one fetched verse; serves as the
+//                          progress log (for resume) and the input for
+//                          cmd/youversion-importer. Must not be empty.
 YouVersionAPIKey          string
 YouVersionBaseURL         string
 YouVersionChineseBibleID  int

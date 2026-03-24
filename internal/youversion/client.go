@@ -1,17 +1,50 @@
 package youversion
 
+// client.go implements the HTTP transport layer for the YouVersion Platform
+// API v1 (https://api.youversion.com/v1).
+//
+// All API calls funnel through the private get() helper, which injects the
+// required x-yvp-app-key authentication header, reads the full response body,
+// and returns a typed HTTPStatusError for non-200 responses — enabling callers
+// such as fetchWithRetry to distinguish retryable (429, 5xx) from permanent
+// (403, 404) failures without parsing error strings.
+
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
 	"time"
 )
 
 const (
+	// headerAPIKey is the HTTP request header name for YouVersion Platform API
+	// authentication. The API requires this header on every request.
 	headerAPIKey = "x-yvp-app-key"
+
+	// maxResponseBytes caps the success response body read at 10 MiB to prevent
+	// OOM from a rogue or misconfigured server returning an unbounded payload.
+	// The largest expected response (GetBooks, 66 books) is well under 1 MiB.
+	maxResponseBytes = 10 << 20 // 10 MiB
+
+	// defaultMaxIdleConnsPerHost is a conservative idle-connection pool size
+	// that covers crawlers using up to ~50 concurrent workers without incurring
+	// repeated TLS re-handshakes from connection churn. Callers that know their
+	// exact worker count should use NewClientWithConcurrency to tune this value.
+	defaultMaxIdleConnsPerHost = 64
+
+	// defaultIdleConnTimeoutSec matches Go's http.DefaultTransport behaviour,
+	// ensuring idle connections are reclaimed after a predictable quiet period.
+	defaultIdleConnTimeoutSec = 90
+
+	// maxErrorBodyBytes caps how much of a non-2xx response body is buffered
+	// into HTTPStatusError.Body, preventing OOM on unexpectedly large error
+	// pages (e.g. a WAF returning a full HTML document on a 403 or 429).
+	maxErrorBodyBytes = 4 * 1024
 )
 
 // HTTPStatusError is returned by get() when the server responds with a
@@ -39,25 +72,52 @@ type Client struct {
 }
 
 // NewClient returns a Client configured with the given base URL and API key.
-// timeoutSec controls the per-request HTTP timeout.
+// timeoutSec controls the per-request HTTP timeout. The underlying transport
+// uses defaultMaxIdleConnsPerHost idle connections per host; for crawlers with
+// a known worker count, prefer NewClientWithConcurrency to size the pool exactly.
 func NewClient(baseURL, apiKey string, timeoutSec int) *Client {
+	return NewClientWithConcurrency(baseURL, apiKey, timeoutSec, defaultMaxIdleConnsPerHost)
+}
+
+// NewClientWithConcurrency returns a Client whose HTTP transport idle-connection
+// pool is sized to maxConnsPerHost. Setting this to the crawler's worker count
+// ensures that each worker can reuse a kept-alive connection across requests,
+// eliminating repeated TCP+TLS handshakes (~150 ms each) from connection churn.
+//
+// Rule of thumb: set maxConnsPerHost = WORKERS (e.g. 20 for the default config).
+func NewClientWithConcurrency(baseURL, apiKey string, timeoutSec, maxConnsPerHost int) *Client {
+	if maxConnsPerHost <= 0 {
+		maxConnsPerHost = defaultMaxIdleConnsPerHost
+	}
+	transport := &http.Transport{
+		// Size idle pool to the caller's concurrency level so every worker
+		// can hold a persistent connection without evicting a sibling's.
+		MaxIdleConns:        maxConnsPerHost * 2,
+		MaxIdleConnsPerHost: maxConnsPerHost,
+		IdleConnTimeout:     defaultIdleConnTimeoutSec * time.Second,
+	}
 	return &Client{
 		baseURL: baseURL,
 		apiKey:  apiKey,
 		httpClient: &http.Client{
-			Timeout: time.Duration(timeoutSec) * time.Second,
+			Timeout:   time.Duration(timeoutSec) * time.Second,
+			Transport: transport,
 		},
 	}
 }
 
 // get performs a GET request to path (relative to baseURL), decodes the JSON
 // response body into dest, and returns any HTTP or decode error.
-func (c *Client) get(path string, dest any) error {
-	u := c.baseURL + path
-	req, err := http.NewRequest(http.MethodGet, u, nil)
+// ctx is propagated into the HTTP request so context cancellation (e.g. Ctrl+C)
+// aborts in-flight TCP reads immediately rather than waiting for the OS timeout.
+func (c *Client) get(ctx context.Context, path string, dest any) error {
+	// Trim trailing slash from baseURL to prevent double-slash paths.
+	u := strings.TrimRight(c.baseURL, "/") + path
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 	if err != nil {
 		return fmt.Errorf("build request %s: %w", u, err)
 	}
+	// Inject the app key on every outgoing request.
 	req.Header.Set(headerAPIKey, c.apiKey)
 
 	resp, err := c.httpClient.Do(req)
@@ -66,42 +126,51 @@ func (c *Client) get(path string, dest any) error {
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return fmt.Errorf("read body %s: %w", u, err)
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		return &HTTPStatusError{
-			Method:     http.MethodGet,
-			URL:        u,
-			StatusCode: resp.StatusCode,
-			Body:       string(body),
+	// Cap success body reads to prevent OOM from an unexpected large response.
+	// Error bodies use a smaller cap (maxErrorBodyBytes) defined below.
+	if resp.StatusCode == http.StatusOK {
+		limited := io.LimitReader(resp.Body, maxResponseBytes)
+		body, err := io.ReadAll(limited)
+		if err != nil {
+			return fmt.Errorf("read body %s: %w", u, err)
 		}
+		if err := json.Unmarshal(body, dest); err != nil {
+			return fmt.Errorf("decode JSON from %s: %w", u, err)
+		}
+		return nil
 	}
 
-	if err := json.Unmarshal(body, dest); err != nil {
-		return fmt.Errorf("decode JSON from %s: %w", u, err)
+	// Non-200: read error body (capped) for diagnostics, then return typed error.
+	// Draining the body lets the transport reuse the keep-alive connection.
+	errBody, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrorBodyBytes))
+	errBodyStr := string(errBody)
+	if len(errBodyStr) == maxErrorBodyBytes {
+		errBodyStr += "…[truncated]"
 	}
-	return nil
+	return &HTTPStatusError{
+		Method:     http.MethodGet,
+		URL:        u,
+		StatusCode: resp.StatusCode,
+		Body:       errBodyStr,
+	}
 }
 
 // GetBibles returns all Bible versions whose language matches languageRange.
 // languageRange uses BCP-47 subtag syntax, e.g. "en", "zh-Hans".
-func (c *Client) GetBibles(languageRange string) (*BiblesResponse, error) {
+func (c *Client) GetBibles(ctx context.Context, languageRange string) (*BiblesResponse, error) {
 	path := "/bibles?" + url.QueryEscape("language_ranges[]") + "=" + url.QueryEscape(languageRange)
 	var result BiblesResponse
-	if err := c.get(path, &result); err != nil {
+	if err := c.get(ctx, path, &result); err != nil {
 		return nil, fmt.Errorf("GetBibles(%q): %w", languageRange, err)
 	}
 	return &result, nil
 }
 
 // GetBible returns metadata for the Bible version with the given numeric ID.
-func (c *Client) GetBible(bibleID int) (*BibleVersion, error) {
+func (c *Client) GetBible(ctx context.Context, bibleID int) (*BibleVersion, error) {
 	path := "/bibles/" + strconv.Itoa(bibleID)
 	var result BibleVersion
-	if err := c.get(path, &result); err != nil {
+	if err := c.get(ctx, path, &result); err != nil {
 		return nil, fmt.Errorf("GetBible(%d): %w", bibleID, err)
 	}
 	return &result, nil
@@ -110,10 +179,10 @@ func (c *Client) GetBible(bibleID int) (*BibleVersion, error) {
 // GetBooks returns all books (with their full chapter and verse structure) for
 // the given Bible version. This is the largest single API call — it returns
 // all 66 books with nested chapters and verse identifiers in one response.
-func (c *Client) GetBooks(bibleID int) (*BooksResponse, error) {
+func (c *Client) GetBooks(ctx context.Context, bibleID int) (*BooksResponse, error) {
 	path := "/bibles/" + strconv.Itoa(bibleID) + "/books"
 	var result BooksResponse
-	if err := c.get(path, &result); err != nil {
+	if err := c.get(ctx, path, &result); err != nil {
 		return nil, fmt.Errorf("GetBooks(bible=%d): %w", bibleID, err)
 	}
 	return &result, nil
@@ -121,10 +190,10 @@ func (c *Client) GetBooks(bibleID int) (*BooksResponse, error) {
 
 // GetBook returns the detail for one book (including full chapter+verse tree).
 // bookID is the USFM book abbreviation, e.g. "GEN", "MAT".
-func (c *Client) GetBook(bibleID int, bookID string) (*BookData, error) {
+func (c *Client) GetBook(ctx context.Context, bibleID int, bookID string) (*BookData, error) {
 	path := "/bibles/" + strconv.Itoa(bibleID) + "/books/" + url.PathEscape(bookID)
 	var result BookData
-	if err := c.get(path, &result); err != nil {
+	if err := c.get(ctx, path, &result); err != nil {
 		return nil, fmt.Errorf("GetBook(bible=%d book=%s): %w", bibleID, bookID, err)
 	}
 	return &result, nil
@@ -132,11 +201,11 @@ func (c *Client) GetBook(bibleID int, bookID string) (*BookData, error) {
 
 // GetChapter returns one chapter's verse list for the given book and 1-based
 // chapter number. chapterNum is an integer (e.g. 1 for chapter 1).
-func (c *Client) GetChapter(bibleID int, bookID string, chapterNum int) (*ChapterData, error) {
+func (c *Client) GetChapter(ctx context.Context, bibleID int, bookID string, chapterNum int) (*ChapterData, error) {
 	path := fmt.Sprintf("/bibles/%d/books/%s/chapters/%d",
 		bibleID, url.PathEscape(bookID), chapterNum)
 	var result ChapterData
-	if err := c.get(path, &result); err != nil {
+	if err := c.get(ctx, path, &result); err != nil {
 		return nil, fmt.Errorf("GetChapter(bible=%d book=%s chap=%d): %w", bibleID, bookID, chapterNum, err)
 	}
 	return &result, nil
@@ -145,11 +214,11 @@ func (c *Client) GetChapter(bibleID int, bookID string, chapterNum int) (*Chapte
 // GetVerse returns the structural record for one verse.
 // This returns only identifiers (id, passage_id, title), not verse text.
 // Use GetPassage to retrieve the actual text content.
-func (c *Client) GetVerse(bibleID int, bookID string, chapterNum, verseNum int) (*VerseData, error) {
+func (c *Client) GetVerse(ctx context.Context, bibleID int, bookID string, chapterNum, verseNum int) (*VerseData, error) {
 	path := fmt.Sprintf("/bibles/%d/books/%s/chapters/%d/verses/%d",
 		bibleID, url.PathEscape(bookID), chapterNum, verseNum)
 	var result VerseData
-	if err := c.get(path, &result); err != nil {
+	if err := c.get(ctx, path, &result); err != nil {
 		return nil, fmt.Errorf("GetVerse(bible=%d book=%s chap=%d verse=%d): %w",
 			bibleID, bookID, chapterNum, verseNum, err)
 	}
@@ -159,9 +228,9 @@ func (c *Client) GetVerse(bibleID int, bookID string, chapterNum, verseNum int) 
 // GetVOTD returns all 366 verse-of-the-day entries (day → passage reference).
 // The returned passage IDs (e.g. "ISA.43.18-19") are USFM passage references;
 // use GetPassage to retrieve the verse text for each entry.
-func (c *Client) GetVOTD() (*VOTDResponse, error) {
+func (c *Client) GetVOTD(ctx context.Context) (*VOTDResponse, error) {
 	var result VOTDResponse
-	if err := c.get("/verse_of_the_days", &result); err != nil {
+	if err := c.get(ctx, "/verse_of_the_days", &result); err != nil {
 		return nil, fmt.Errorf("GetVOTD: %w", err)
 	}
 	return &result, nil
@@ -174,10 +243,10 @@ func (c *Client) GetVOTD() (*VOTDResponse, error) {
 // Access depends on the Bible version's licensing agreement. Translations
 // without a publisher restriction (e.g. NIV11 ID 111, CSB 中文標準譯本 ID 312) return
 // text freely. Restricted translations (e.g. 新標點和合本 ID 46) return a 403 error.
-func (c *Client) GetPassage(bibleID int, passageID string) (*PassageData, error) {
+func (c *Client) GetPassage(ctx context.Context, bibleID int, passageID string) (*PassageData, error) {
 	path := fmt.Sprintf("/bibles/%d/passages/%s", bibleID, url.PathEscape(passageID))
 	var result PassageData
-	if err := c.get(path, &result); err != nil {
+	if err := c.get(ctx, path, &result); err != nil {
 		return nil, fmt.Errorf("GetPassage(bible=%d passage=%s): %w", bibleID, passageID, err)
 	}
 	return &result, nil

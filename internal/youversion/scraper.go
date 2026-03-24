@@ -12,6 +12,24 @@
 //
 // To use a different Chinese translation, set
 // YOUVERSION_CHINESE_BIBLE_ID=<id> in your .env file.
+//
+// # Parallel Mode (required)
+//
+// YouVersionScraper always operates in parallel mode:
+//   - Phase 1 (setupBooks): fetches book/title metadata and writes it to the DB.
+//   - Phase 2 (crawlVersesParallel): fetches verse text using N worker goroutines
+//     with rate limiting and exponential-backoff retry, then appends each verse
+//     as a JSON line to a JSONL checkpoint file. No verse DB writes happen here.
+//
+// After the crawler finishes, run cmd/youversion-importer to batch-write the
+// JSONL checkpoint file into PostgreSQL.
+//
+// # sub_title Field
+//
+// The YouVersion Platform API v1 does not expose pericope headings or section
+// sub-titles (e.g. "The Creation", "第一節"). The bibles.bible_section_contents
+// sub_title column is left empty for all YouVersion-sourced records.
+// If sub-titles are needed, they must be sourced from a different API or data set.
 package youversion
 
 import (
@@ -37,6 +55,12 @@ const (
 	LangChinese = "chinese"
 	// LangEnglish is the language key stored in DB content rows for English text.
 	LangEnglish = "english"
+
+	// workChannelMultiplier scales the work channel buffer relative to the worker
+	// count. A buffer of workers×2 gives each worker one item of look-ahead while
+	// keeping peak memory O(workers) instead of O(total verses). This replaces the
+	// prior O(n) channel buffer that duplicated the entire work slice in memory.
+	workChannelMultiplier = 2
 )
 
 // BibleAPIClient is the subset of the YouVersion Platform API required by
@@ -45,16 +69,29 @@ const (
 type BibleAPIClient interface {
 	// GetBooks returns all books (with chapter and verse structure) for the
 	// given Bible version ID.
-	GetBooks(bibleID int) (*BooksResponse, error)
+	GetBooks(ctx context.Context, bibleID int) (*BooksResponse, error)
 	// GetPassage returns the text content for the given USFM passage ID
 	// (e.g. "GEN.1.1", "GEN.1.1-3", "GEN.1") from the given Bible version.
-	GetPassage(bibleID int, passageID string) (*PassageData, error)
+	GetPassage(ctx context.Context, bibleID int, passageID string) (*PassageData, error)
 }
 
 // errVerseNotFound is returned by fetchWithRetry when the API responds with
 // HTTP 404 for a passage. 404s are expected for certain verses that modern
 // translations (e.g. NIV) omit. Workers treat this as a permanent skip.
 var errVerseNotFound = errors.New("verse not found (404)")
+
+// ErrPhase2WriteFailures is a sentinel returned by RunWithContext when one or
+// more checkpoint write errors occur during Phase 2. The crawler still writes
+// all successful verses; the error gives the operator a non-zero exit code
+// signal to investigate the count logged in Phase 2's summary line.
+var ErrPhase2WriteFailures = errors.New("one or more checkpoint write errors in phase 2")
+
+const (
+	// maxWorkers is the hard upper cap on the parallel worker count.
+	// Beyond this value, the token-bucket rate limiter dominates throughput
+	// and additional goroutines only add scheduling overhead.
+	maxWorkers = 200
+)
 
 // verseWork is one unit of parallel crawl work — a single verse to fetch.
 type verseWork struct {
@@ -72,23 +109,24 @@ type verseWork struct {
 // Phase 1 – setupBooks: fetches book lists for both languages and writes
 // book rows plus localized titles to the database.
 //
-// Phase 2 – crawlVerses: for every book/chapter/verse returned by the API,
-// fetches passage text and persists verse records.
+// Phase 2 – crawlVersesParallel: for every book/chapter/verse returned by the
+// API, fetches passage text using N worker goroutines with rate limiting and
+// exponential-backoff retry, and appends each result to the JSONL Checkpoint
+// file. The separate cmd/youversion-importer then batch-writes the file to DB.
 //
-// Optional parallel mode: when Checkpoint is non-nil, Phase 2 uses a worker
-// pool that writes verse records to a JSONL file. A separate importer program
-// then batch-writes the JSONL to the database. This mode supports graceful
-// shutdown and resume from the last checkpoint.
+// All fields are required. Use NewYouVersionScraper to build the base struct,
+// then set Checkpoint, Workers, RateLimitRPS, MaxRetries, and RetryBaseMS
+// before calling Run/RunWithContext.
 type YouVersionScraper struct {
 	Repo           *repository.BibleRepository
 	Client         BibleAPIClient
 	ChineseBibleID int
 	EnglishBibleID int
 
-	// Optional parallel-mode fields. Leave all zero/nil for sequential mode.
-	Checkpoint   *Checkpoint // non-nil enables parallel+JSONL mode
-	Workers      int         // parallel worker count (0 → 1)
-	RateLimitRPS float64     // token-bucket rate limit in req/s (0 → 1.0)
+	// Parallel-mode fields — all must be set before calling Run/RunWithContext.
+	Checkpoint   *Checkpoint // JSONL progress file; non-nil required
+	Workers      int         // parallel worker count (>0 required)
+	RateLimitRPS float64     // token-bucket rate limit in req/s (>0 required)
 	MaxRetries   int         // max exponential-backoff retries (0 → 5)
 	RetryBaseMS  int         // backoff initial interval in ms (0 → 1000)
 }
@@ -122,27 +160,38 @@ type bookMeta struct {
 	index int
 }
 
-// Run executes both crawler phases in sequence using a background context.
-// It is kept for backward compatibility; prefer RunWithContext for graceful
-// shutdown support.
+// Run executes both crawler phases using a background context.
+// Equivalent to RunWithContext(context.Background()).
 func (s *YouVersionScraper) Run() error {
 	return s.RunWithContext(context.Background())
 }
 
-// RunWithContext executes both crawler phases. The provided context is used to
-// support graceful shutdown: cancelling ctx causes parallel workers to stop
-// after their current verse. Sequential mode ignores ctx beyond startup.
+// RunWithContext executes both crawler phases. ctx is used for graceful
+// shutdown: cancelling it causes parallel workers to stop after their current
+// verse. Phase 1 (setupBooks) always runs regardless of ctx state.
+//
+// All parallel-mode fields (Checkpoint, Workers, RateLimitRPS) are validated
+// before any API call is made — misconfigured runs fail fast without wasting
+// the Phase 1 network round-trips.
 func (s *YouVersionScraper) RunWithContext(ctx context.Context) error {
+	// Validate required fields upfront, before any API call (fail-fast).
+	if s.Checkpoint == nil {
+		return fmt.Errorf("Checkpoint is required: set YouVersionScraper.Checkpoint before calling Run")
+	}
+
 	log.Println("YouVersion Scraper: starting...")
-	setup, err := s.setupBooks()
+
+	// Phase 1: write book/title metadata to the database.
+	setup, err := s.setupBooks(ctx)
 	if err != nil {
 		return fmt.Errorf("phase 1 failed: %w", err)
 	}
-	if s.Checkpoint != nil {
-		s.crawlVersesParallel(ctx, setup)
-	} else {
-		s.crawlVerses(setup)
+
+	// Phase 2: fetch verse text in parallel, write to JSONL checkpoint.
+	if err := s.crawlVersesParallel(ctx, setup); err != nil {
+		return fmt.Errorf("phase 2 failed: %w", err)
 	}
+
 	log.Println("YouVersion Scraper: done.")
 	return nil
 }
@@ -151,15 +200,15 @@ func (s *YouVersionScraper) RunWithContext(ctx context.Context) error {
 // creates a DB record for each book in canonical order, and writes both
 // localized titles. Processing is sequential; the returned bookSetup contains
 // all data needed by Phase 2.
-func (s *YouVersionScraper) setupBooks() (*bookSetup, error) {
+func (s *YouVersionScraper) setupBooks(ctx context.Context) (*bookSetup, error) {
 	log.Printf("Phase 1: fetching book list for English Bible (ID %d)...", s.EnglishBibleID)
-	enResp, err := s.Client.GetBooks(s.EnglishBibleID)
+	enResp, err := s.Client.GetBooks(ctx, s.EnglishBibleID)
 	if err != nil {
 		return nil, fmt.Errorf("GetBooks(EN=%d): %w", s.EnglishBibleID, err)
 	}
 
 	log.Printf("Phase 1: fetching book list for Chinese Bible (ID %d)...", s.ChineseBibleID)
-	zhResp, err := s.Client.GetBooks(s.ChineseBibleID)
+	zhResp, err := s.Client.GetBooks(ctx, s.ChineseBibleID)
 	if err != nil {
 		return nil, fmt.Errorf("GetBooks(ZH=%d): %w", s.ChineseBibleID, err)
 	}
@@ -197,115 +246,18 @@ func (s *YouVersionScraper) setupBooks() (*bookSetup, error) {
 	return &bookSetup{metas: metas, enBooks: enResp.Data, zhBooks: zhResp.Data}, nil
 }
 
-// crawlVerses iterates over all books/chapters/verses for English then Chinese,
-// calling the YouVersion passages endpoint per verse and persisting the text.
-// Chapter-level errors are logged; verse-level errors within a chapter are
-// also logged but do not abort processing of subsequent verses.
-func (s *YouVersionScraper) crawlVerses(setup *bookSetup) {
-	log.Println("Phase 2: crawling verses...")
-
-	type langConfig struct {
-		lang    string
-		bibleID int
-		books   []BookData
-	}
-	langs := []langConfig{
-		{LangEnglish, s.EnglishBibleID, setup.enBooks},
-		{LangChinese, s.ChineseBibleID, setup.zhBooks},
-	}
-
-	for _, lc := range langs {
-		log.Printf("Phase 2: language=%s bibleID=%d", lc.lang, lc.bibleID)
-		for _, meta := range setup.metas {
-			book := lc.books[meta.index]
-			for chapIdx, chap := range book.Chapters {
-				chapSort := chapIdx + 1
-				if err := s.processChapter(meta.id, chapSort, chap, lc.lang, lc.bibleID); err != nil {
-					log.Printf("processChapter (book=%d chap=%d lang=%s): %v",
-						meta.index+1, chapSort, lc.lang, err)
-				}
-			}
-		}
-	}
-
-	log.Println("Phase 2: done.")
-}
-
-// processChapter creates the chapter DB record and title, then fetches and
-// persists every verse listed in the chapter's verse slice.
-// Returns an error only if the chapter DB record cannot be created; verse-level
-// errors are logged and skipped so one bad verse does not abort the chapter.
-func (s *YouVersionScraper) processChapter(
-	bookID uuid.UUID, chapSort int, chap ChapterData, lang string, bibleID int,
-) error {
-	chapID, err := s.Repo.GetOrCreateChapter(bookID, chapSort)
-	if err != nil {
-		return fmt.Errorf("GetOrCreateChapter: %w", err)
-	}
-
-	chapTitle := fmt.Sprintf("Chapter %d", chapSort)
-	if lang == LangChinese {
-		chapTitle = fmt.Sprintf("第 %d 章", chapSort)
-	}
-	if err := s.Repo.UpsertChapterContent(chapID, lang, chapTitle); err != nil {
-		log.Printf("UpsertChapterContent (chap=%d lang=%s): %v", chapSort, lang, err)
-	}
-
-	for _, verse := range chap.Verses {
-		verseNum, err := strconv.Atoi(verse.ID)
-		if err != nil || verseNum <= 0 {
-			log.Printf("Invalid verse ID %q (chap=%d lang=%s): skipping", verse.ID, chapSort, lang)
-			continue
-		}
-		passage, err := s.Client.GetPassage(bibleID, verse.PassageID)
-		if err != nil {
-			log.Printf("GetPassage(%s lang=%s): %v", verse.PassageID, lang, err)
-			continue
-		}
-		if err := s.saveVerse(bookID, chapID, verseNum, lang, passage.Content); err != nil {
-			log.Printf("saveVerse (chap=%d verse=%d lang=%s): %v", chapSort, verseNum, lang, err)
-		}
-	}
-	return nil
-}
-
-// saveVerse creates the verse structural record (bible_sections) and writes its
-// localized content (bible_section_contents). The verse title follows the same
-// convention as the HTML scraper: "verse N" for English, "第N節" for Chinese.
-func (s *YouVersionScraper) saveVerse(
-	bookID, chapID uuid.UUID, verseNum int, lang, content string,
-) error {
-	if content == "" {
-		return fmt.Errorf("empty passage content for verse %d", verseNum)
-	}
-
-	verseTitle := fmt.Sprintf("verse %d", verseNum)
-	if lang == LangChinese {
-		verseTitle = fmt.Sprintf("第%d節", verseNum)
-	}
-
-	secID, err := s.Repo.GetOrCreateSection(bookID, chapID, verseNum)
-	if err != nil {
-		return fmt.Errorf("GetOrCreateSection: %w", err)
-	}
-	if err := s.Repo.UpsertSectionContent(secID, lang, verseTitle, content); err != nil {
-		return fmt.Errorf("UpsertSectionContent: %w", err)
-	}
-	return nil
-}
-
 // crawlVersesParallel is the parallel implementation of Phase 2. It loads the
 // checkpoint to determine which verses are already done, builds a work queue
 // of remaining verses, runs N worker goroutines that each fetch with retry and
 // rate limiting, and uses a single writer goroutine to append results to the
 // JSONL checkpoint file — eliminating concurrent write races.
-func (s *YouVersionScraper) crawlVersesParallel(ctx context.Context, setup *bookSetup) {
+func (s *YouVersionScraper) crawlVersesParallel(ctx context.Context, setup *bookSetup) error {
 	log.Println("Phase 2: crawling verses (parallel)...")
 
 	completed, err := s.Checkpoint.LoadCompleted()
 	if err != nil {
 		log.Printf("Phase 2: warning: could not load checkpoint: %v — starting fresh", err)
-		completed = make(map[string]bool)
+		completed = make(map[string]struct{})
 	}
 	log.Printf("Phase 2: %d verses already in checkpoint", len(completed))
 
@@ -328,13 +280,16 @@ func (s *YouVersionScraper) crawlVersesParallel(ctx context.Context, setup *book
 			for chapIdx, chap := range book.Chapters {
 				chapSort := chapIdx + 1
 				for _, verse := range chap.Verses {
+					// verse.ID from the API is a numeric string (e.g. "14"), not an
+					// integer field; parse it so VerseSort stores a numeric sort key.
+					// Reject non-positive values to prevent DB sort-key violations.
 					verseNum, parseErr := strconv.Atoi(verse.ID)
 					if parseErr != nil || verseNum <= 0 {
 						log.Printf("Phase 2: invalid verse ID %q (book=%d chap=%d lang=%s): skipping",
 							verse.ID, bookSort, chapSort, lc.lang)
 						continue
 					}
-					if completed[checkpointKey(lc.lang, verse.PassageID)] {
+						if _, ok := completed[checkpointKey(lc.lang, verse.PassageID)]; ok {
 						continue
 					}
 					works = append(works, verseWork{
@@ -356,12 +311,18 @@ func (s *YouVersionScraper) crawlVersesParallel(ctx context.Context, setup *book
 	if len(works) == 0 {
 		log.Println("Phase 2: nothing to do — all verses already in checkpoint.")
 		log.Println("Phase 2: done.")
-		return
+		return nil
 	}
 
+	// Sanitize: zero or negative config values fall back to safe defaults
+	// so the scraper is runnable even with a minimal or missing configuration.
 	workers := s.Workers
-	if workers <= 0 {
+	switch {
+	case workers <= 0:
 		workers = 1
+	case workers > maxWorkers:
+		log.Printf("Phase 2: clamping workers from %d to %d (hard cap)", workers, maxWorkers)
+		workers = maxWorkers
 	}
 	rps := s.RateLimitRPS
 	if rps <= 0 {
@@ -371,20 +332,39 @@ func (s *YouVersionScraper) crawlVersesParallel(ctx context.Context, setup *book
 	// Shared rate limiter: burst = workers so a fresh start doesn't block.
 	limiter := rate.NewLimiter(rate.Limit(rps), workers)
 
-	workCh := make(chan verseWork, len(works))
-	for _, w := range works {
-		workCh <- w
-	}
-	close(workCh)
+	// workCh is bounded to workers×workChannelMultiplier (40 slots at WORKERS=20)
+	// instead of len(works) (~62,200 slots ≈ 4 MB). A producer goroutine feeds
+	// it with back-pressure: workers pull at their own rate, and the producer
+	// blocks when the buffer is full. This keeps peak work-queue RAM O(workers)
+	// rather than O(n total verses), cutting the allocation from ~4 MB to ~2.6 KB.
+	//
+	// The ctx.Done() arm in the producer's select ensures that a SIGINT/SIGTERM
+	// drains cleanly: the producer stops enqueuing, closes workCh, and workers
+	// exit via their own ctx.Done() check before the next verse.
+	workCh := make(chan verseWork, workers*workChannelMultiplier)
+	go func() {
+		defer close(workCh)
+		for _, w := range works {
+			select {
+			case workCh <- w:
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
 
+	// resultCh buffer = workers×4 gives the single checkpoint writer headroom
+	// to fall behind momentarily without blocking worker goroutines.
 	resultCh := make(chan VerseRecord, workers*4)
 
 	var wg sync.WaitGroup
-	for i := 0; i < workers; i++ {
+	for workerID := 0; workerID < workers; workerID++ {
 		wg.Add(1)
-		go func() {
+		go func(id int) {
 			defer wg.Done()
 			for w := range workCh {
+				// Check for cancellation before each verse so workers exit promptly after
+				// SIGINT/SIGTERM without waiting for the rate limiter or a retry sleep.
 				select {
 				case <-ctx.Done():
 					return
@@ -404,7 +384,7 @@ func (s *YouVersionScraper) crawlVersesParallel(ctx context.Context, setup *book
 					if errors.Is(fetchErr, context.Canceled) || errors.Is(fetchErr, context.DeadlineExceeded) {
 						return
 					}
-					log.Printf("Phase 2: GetPassage(%s lang=%s): %v", w.passageID, w.lang, fetchErr)
+					log.Printf("Phase 2: worker=%d GetPassage(%s lang=%s): %v", id, w.passageID, w.lang, fetchErr)
 					continue
 				}
 				select {
@@ -413,16 +393,23 @@ func (s *YouVersionScraper) crawlVersesParallel(ctx context.Context, setup *book
 					return
 				}
 			}
-		}()
+		}(workerID)
 	}
 
-	// Close resultCh once all workers finish.
+	// A dedicated goroutine closes resultCh after all workers finish.
+	// This cannot be done inline because the main goroutine is the single
+	// writer blocked on "for rec := range resultCh" below; wg.Wait() must
+	// run concurrently. Closing resultCh unblocks the range and exits the writer.
 	go func() {
 		wg.Wait()
 		close(resultCh)
 	}()
 
-	// Single writer: reads results and appends to checkpoint file.
+	// Single writer: serialise all checkpoint writes through the main goroutine
+	// so file I/O is never concurrent. Ranging over a closed channel drains it
+	// fully before returning — the canonical Go fan-in pattern.
+	// Checkpoint.Append still holds its own mutex as a safety net for any
+	// future callers that might write from multiple goroutines.
 	var written, writeErr int
 	for rec := range resultCh {
 		if appendErr := s.Checkpoint.Append(rec); appendErr != nil {
@@ -435,6 +422,11 @@ func (s *YouVersionScraper) crawlVersesParallel(ctx context.Context, setup *book
 
 	log.Printf("Phase 2: done. written=%d already-done=%d write-errors=%d",
 		written, len(completed), writeErr)
+
+	if writeErr > 0 {
+		return fmt.Errorf("%w: count=%d", ErrPhase2WriteFailures, writeErr)
+	}
+	return nil
 }
 
 // fetchWithRetry fetches a single verse with exponential-backoff retry.
@@ -457,14 +449,14 @@ func (s *YouVersionScraper) fetchWithRetry(
 
 	bo := backoff.NewExponentialBackOff()
 	bo.InitialInterval = time.Duration(baseMS) * time.Millisecond
-	bo.Multiplier = 2.0
-	bo.RandomizationFactor = 0.25
+	bo.Multiplier = 2.0           // double the wait interval on each attempt
+	bo.RandomizationFactor = 0.25 // ±25 % jitter to prevent thundering-herd retries
 	bo.MaxInterval = 60 * time.Second
-	bo.MaxElapsedTime = 0 // controlled by MaxRetries instead
+	bo.MaxElapsedTime = 0 // 0 disables the wall-clock cap; MaxRetries governs stopping
 
 	var rec VerseRecord
 	operation := func() error {
-		passage, apiErr := s.Client.GetPassage(w.bibleID, w.passageID)
+		passage, apiErr := s.Client.GetPassage(ctx, w.bibleID, w.passageID)
 		if apiErr != nil {
 			var httpErr *HTTPStatusError
 			if errors.As(apiErr, &httpErr) {
@@ -497,6 +489,8 @@ func (s *YouVersionScraper) fetchWithRetry(
 	}
 
 	boWithCtx := backoff.WithContext(bo, ctx)
+	// G115 (gosec): MaxRetries is validated above to be a small positive int;
+	// the uint64 conversion cannot overflow in any realistic scenario.
 	boWithMax := backoff.WithMaxRetries(boWithCtx, uint64(maxRetries)) //nolint:gosec
 	if retryErr := backoff.Retry(operation, boWithMax); retryErr != nil {
 		return VerseRecord{}, retryErr

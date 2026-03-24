@@ -25,6 +25,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"log"
 	"os"
@@ -163,7 +164,7 @@ func main() {
 
 	// ── 1. Bibles ──────────────────────────────────────────────────────────
 	log.Println("Fetching Chinese Bible versions (zh-Hans)...")
-	zhBibles, err := client.GetBibles("zh-Hans")
+	zhBibles, err := client.GetBibles(context.Background(), "zh-Hans")
 	if err != nil {
 		log.Printf("Warning: could not fetch zh-Hans bibles: %v", err)
 	} else {
@@ -171,7 +172,7 @@ func main() {
 	}
 
 	log.Println("Fetching English Bible versions...")
-	enBibles, err := client.GetBibles("en")
+	enBibles, err := client.GetBibles(context.Background(), "en")
 	if err != nil {
 		log.Printf("Warning: could not fetch en bibles: %v", err)
 	} else {
@@ -179,7 +180,7 @@ func main() {
 	}
 
 	log.Printf("Fetching selected Chinese Bible (ID %d)...", chineseBibleID)
-	zhBible, err := client.GetBible(chineseBibleID)
+	zhBible, err := client.GetBible(context.Background(), chineseBibleID)
 	if err != nil {
 		log.Printf("Warning: could not fetch Chinese Bible %d: %v", chineseBibleID, err)
 	} else {
@@ -187,7 +188,7 @@ func main() {
 	}
 
 	log.Printf("Fetching selected English Bible (ID %d)...", englishBibleID)
-	enBible, err := client.GetBible(englishBibleID)
+	enBible, err := client.GetBible(context.Background(), englishBibleID)
 	if err != nil {
 		log.Printf("Warning: could not fetch English Bible %d: %v", englishBibleID, err)
 	} else {
@@ -196,7 +197,7 @@ func main() {
 
 	// ── 2. Books ───────────────────────────────────────────────────────────
 	log.Printf("Fetching all books for Chinese Bible (ID %d)...", chineseBibleID)
-	zhBooks, err := client.GetBooks(chineseBibleID)
+	zhBooks, err := client.GetBooks(context.Background(), chineseBibleID)
 	if err != nil {
 		log.Printf("Warning: could not fetch Chinese books: %v", err)
 	} else {
@@ -204,7 +205,7 @@ func main() {
 	}
 
 	log.Printf("Fetching all books for English Bible (ID %d)...", englishBibleID)
-	enBooks, err := client.GetBooks(englishBibleID)
+	enBooks, err := client.GetBooks(context.Background(), englishBibleID)
 	if err != nil {
 		log.Printf("Warning: could not fetch English books: %v", err)
 	} else {
@@ -216,12 +217,12 @@ func main() {
 		key := bookID + "_1"
 		log.Printf("Fetching sample chapter 1 for book %s...", bookID)
 
-		zhChap, err := client.GetChapter(chineseBibleID, bookID, 1)
+		zhChap, err := client.GetChapter(context.Background(), chineseBibleID, bookID, 1)
 		if err != nil {
 			log.Printf("Warning: could not fetch ZH chapter %s.1: %v", bookID, err)
 		}
 
-		enChap, err := client.GetChapter(englishBibleID, bookID, 1)
+		enChap, err := client.GetChapter(context.Background(), englishBibleID, bookID, 1)
 		if err != nil {
 			log.Printf("Warning: could not fetch EN chapter %s.1: %v", bookID, err)
 		}
@@ -234,7 +235,7 @@ func main() {
 
 	// ── 4. Verse of the Day ────────────────────────────────────────────────
 	log.Println("Fetching verse of the day list (all 366 entries)...")
-	votd, err := client.GetVOTD()
+	votd, err := client.GetVOTD(context.Background())
 	if err != nil {
 		log.Printf("Warning: could not fetch VOTD: %v", err)
 	} else {
@@ -262,7 +263,7 @@ func main() {
 	}
 
 	for _, bt := range bibleTests {
-		_, err := client.GetPassage(bt.id, "GEN.1.1")
+		_, err := client.GetPassage(context.Background(), bt.id, "GEN.1.1")
 		entry := passageAccessEntry{
 			BibleID:   bt.id,
 			BibleName: bt.name,
@@ -295,7 +296,7 @@ func main() {
 		entry := passageSampleEntry{BibleID: ab.id, BibleName: ab.name}
 
 		for _, sp := range samplePassageIDs {
-			p, err := client.GetPassage(ab.id, sp.id)
+			p, err := client.GetPassage(context.Background(), ab.id, sp.id)
 			if err != nil {
 				log.Printf("Warning: passage %s for bible %d: %v", sp.id, ab.id, err)
 				continue

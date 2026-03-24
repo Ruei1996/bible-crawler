@@ -326,13 +326,25 @@ Done. Written:
 
 ### Step 5: Run the Crawler
 
-Choose **one** of the two crawler approaches:
+Choose **one** of the two crawler approaches. They are **independent** — run either or both, in any order, but never simultaneously (both write to the same database tables).
+
+---
 
 #### Option A — HTML Scraper (原 springbible.fhl.net)
 
-Requires Step 4 (spec files must already exist). Fetches content from the HTML website.
+**Prerequisites**: Step 4 (spec files must exist). Fetches Bible content by scraping the HTML website.
+
+**Execution order**:
+
+```
+Step 4 (spec-builder) ──→ Option A (HTML crawler)
+```
 
 ```bash
+# Step 4 is required first (generates bible_books_zh.json + bible_books_en.json):
+go run cmd/spec-builder/main.go
+
+# Then run the HTML crawler (writes directly to the database):
 go run cmd/crawler/main.go
 ```
 
@@ -347,18 +359,27 @@ Phase 2 complete.
 Bible Crawler finished successfully.
 ```
 
+---
+
 #### Option B — YouVersion API Crawler ✨
 
-No spec files needed. Fetches content directly from the YouVersion REST API.
-Requires `YOUVERSION_API_KEY` to be set in `.env`.
+**Prerequisites**: `YOUVERSION_API_KEY` and all `YOUVERSION_*` parameters set in `.env`. No spec files needed — all structure is derived from the API.
 
-The YouVersion crawler offers **two sub-modes** for Phase 2 (verse fetching):
+**Execution order** (two required steps, always in this order):
+
+```
+Step B-1 (youversion-crawler) ──→ Step B-2 (youversion-importer)
+```
+
+> ⚠️ Do NOT delete `YOUVERSION_CHECKPOINT_FILE` between steps B-1 and B-2.
+> The importer reads the JSONL file written by the crawler.
 
 ---
 
-##### B-1. Sequential Mode (default — no extra config needed)
+##### B-1. Crawl → JSONL checkpoint
 
-Writes verses directly to the database one-by-one. Safe and simple; requires only the core env vars.
+Phase 1 writes book/title metadata directly to the database.  
+Phase 2 fetches all verse text in parallel and writes it to the JSONL checkpoint file — **no verse DB writes happen here**.
 
 ```bash
 go run cmd/youversion-crawler/main.go
@@ -367,39 +388,11 @@ go run cmd/youversion-crawler/main.go
 Expected output:
 ```text
 Connected to database successfully
+Parallel mode: workers=20 rps=15.0 maxRetries=3 checkpoint="ckpoint.jsonl"
 Starting YouVersion Bible Crawler...
 YouVersion Scraper: starting...
 Phase 1: fetching book list for English Bible (ID 111)...
 Phase 1: fetching book list for Chinese Bible (ID 312)...
-Phase 1: 66/66 books ready.
-Phase 2: crawling verses...
-Phase 2: language=english bibleID=111
-Phase 2: language=chinese bibleID=312
-Phase 2: done.
-YouVersion Scraper: done.
-YouVersion Crawler finished successfully.
-```
-
----
-
-##### B-2. Parallel Mode (recommended — set `YOUVERSION_CHECKPOINT_FILE` in `.env`)
-
-Uses a worker pool with token-bucket rate limiting and exponential-backoff retry. Results are written to a JSONL checkpoint file instead of the database, enabling **graceful resume** after interruption.
-
-**Phase 2A — Crawl to JSONL:**
-
-Make sure `.env` has the parallel-mode variables set (see Step 3), then:
-
-```bash
-go run cmd/youversion-crawler/main.go
-```
-
-Expected output:
-```text
-Connected to database successfully
-Parallel mode: workers=20 rps=15.0 maxRetries=3 checkpoint="verses.jsonl"
-Starting YouVersion Bible Crawler...
-YouVersion Scraper: starting...
 Phase 1: 66/66 books ready.
 Phase 2: crawling verses (parallel)...
 Phase 2: 0 verses already in checkpoint
@@ -407,13 +400,20 @@ Phase 2: 62213/62213 verses remaining
 Phase 2: done. written=62197 already-done=0 write-errors=0
 YouVersion Scraper: done.
 YouVersion Crawler finished successfully.
+Next step: run 'go run cmd/youversion-importer/main.go' to import "ckpoint.jsonl" into the database.
 ```
 
 > **Graceful shutdown**: Press `Ctrl+C` at any time. Workers finish their current verse, flush the checkpoint file, and exit cleanly. Re-run the same command to resume — already-fetched verses are automatically skipped.
 
-> **404 responses** (e.g. `MAT.17.21`, `MAT.18.11`) are **expected** and silently skipped. Modern translations like NIV deliberately omit certain verses. These are not errors.
+> **404 responses** (e.g. `MAT.17.21`, `MAT.18.11`) are **expected** and silently skipped. Modern translations like NIV deliberately omit certain verses.
 
-**Phase 2B — Import JSONL to database:**
+> **sub_title**: The YouVersion API v1 does not expose pericope headings. The `bibles.bible_section_contents.sub_title` column will be empty for all YouVersion-sourced records.
+
+---
+
+##### B-2. Import JSONL → database
+
+Run after B-1 completes (or after a resumed crawl finishes):
 
 ```bash
 go run cmd/youversion-importer/main.go
@@ -421,14 +421,16 @@ go run cmd/youversion-importer/main.go
 
 Expected output:
 ```text
+Imported 1000 verses...
+...
 Import complete: total=62197 written=62197 skipped=0
 ```
 
-> The importer reads `YOUVERSION_CHECKPOINT_FILE` from `.env` automatically — no inline env vars needed. It is fully idempotent (safe to run multiple times) and uses the same `SELECT→INSERT→SELECT` pattern as all other repository writes.
+> Reads `YOUVERSION_CHECKPOINT_FILE` from `.env` automatically. Fully idempotent — safe to run multiple times.
 
 ---
 
-> **Bible version note**: Option B defaults to NIV 2011 (ID 111) for English and CSB 中文標準譯本 (ID 312, Chinese Standard Bible, traditional Chinese) for Chinese — both freely accessible with a YouVersion Platform app key. To use a different Chinese translation, set `YOUVERSION_CHINESE_BIBLE_ID=<id>` in `.env`.
+> **Bible version note**: Option B defaults to NIV 2011 (ID 111) for English and CSB 中文標準譯本 (ID 312, Chinese Standard Bible, traditional Chinese) for Chinese — both freely accessible with a YouVersion Platform app key. To use a different translation, set `YOUVERSION_CHINESE_BIBLE_ID=<id>` in `.env`.
 
 ### Step 6: Validate (optional)
 
@@ -466,8 +468,26 @@ go run cmd/spec-builder/main.go
 
 ### Step C — Re-crawl
 
+**Re-crawl execution order** — choose the same crawler you used originally:
+
+**Option A (HTML Scraper)**:
+```
+Step B (spec-builder, optional) ──→ Step C (HTML crawler)
+```
 ```bash
 go run cmd/crawler/main.go
+```
+
+**Option B (YouVersion API Crawler)** — two required steps in order:
+```
+Step C-1 (youversion-crawler) ──→ Step C-2 (youversion-importer)
+```
+```bash
+# Step C-1: Crawl verses → JSONL checkpoint
+go run cmd/youversion-crawler/main.go
+
+# Step C-2: Import JSONL → database (run after Step C-1 finishes)
+go run cmd/youversion-importer/main.go
 ```
 
 ### Step D — Restore (after re-crawl)
