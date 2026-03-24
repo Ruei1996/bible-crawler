@@ -59,14 +59,36 @@ HTTPTimeoutSec       int // per-request HTTP timeout (seconds)
 //                         Required; obtain from https://platform.youversion.com
 // YouVersionBaseURL     — base URL for the YouVersion API (without trailing slash).
 // YouVersionChineseBibleID — YouVersion Bible ID for the Chinese translation.
-//                         Default 36 = CCB (当代圣经, simplified, freely accessible).
+//                         Default 312 = CSB 中文標準譯本 (Chinese Standard Bible, traditional Chinese). Also available: 36=CCB (Simplified), 43=CSBS (Simplified).
 //                         Switch to 46 (新標點和合本) after obtaining a publisher license.
 // YouVersionEnglishBibleID — YouVersion Bible ID for the English translation.
 //                         Default 111 = NIV 2011 (freely accessible).
-YouVersionAPIKey         string
-YouVersionBaseURL        string
-YouVersionChineseBibleID int
-YouVersionEnglishBibleID int
+//
+// ── YouVersion parallel-crawl tuning ─────────────────────────────────────
+// These settings control the fault-tolerant parallel crawler.
+// They are ignored when YOUVERSION_CHECKPOINT_FILE is empty (sequential mode).
+//
+// YouVersionWorkers      — number of parallel worker goroutines (default 3).
+//                          Increase cautiously; higher values risk rate-limiting.
+// YouVersionRateLimitRPS — token-bucket rate limit: maximum requests per second
+//                          across all workers combined (default 2.0).
+// YouVersionMaxRetries   — maximum retry attempts per verse on transient errors
+//                          (default 5). 404 responses are never retried.
+// YouVersionRetryBaseMS  — initial backoff interval in milliseconds; doubles on
+//                          each retry with ±25 % jitter (default 1000).
+// YouVersionCheckpointFile — path to the JSONL checkpoint file. Each line
+//                          stores one fetched verse and serves as both the
+//                          progress log and the input for cmd/youversion-importer.
+//                          Leave empty to use the original sequential DB-write mode.
+YouVersionAPIKey          string
+YouVersionBaseURL         string
+YouVersionChineseBibleID  int
+YouVersionEnglishBibleID  int
+YouVersionWorkers         int
+YouVersionRateLimitRPS    float64
+YouVersionMaxRetries      int
+YouVersionRetryBaseMS     int
+YouVersionCheckpointFile  string
 }
 
 // Load reads configuration from a .env file (if present) then from the process
@@ -96,8 +118,13 @@ HTTPTimeoutSec:       getEnvInt("HTTP_TIMEOUT_SEC", 30),
 
 YouVersionAPIKey:         getEnv("YOUVERSION_API_KEY", ""),
 YouVersionBaseURL:        getEnv("YOUVERSION_BASE_URL", "https://api.youversion.com/v1"),
-YouVersionChineseBibleID: getEnvInt("YOUVERSION_CHINESE_BIBLE_ID", 36),
+YouVersionChineseBibleID: getEnvInt("YOUVERSION_CHINESE_BIBLE_ID", 312),
 YouVersionEnglishBibleID: getEnvInt("YOUVERSION_ENGLISH_BIBLE_ID", 111),
+YouVersionWorkers:        getEnvInt("YOUVERSION_WORKERS", 3),
+YouVersionRateLimitRPS:   getEnvFloat64("YOUVERSION_RATE_LIMIT_RPS", 2.0),
+YouVersionMaxRetries:     getEnvInt("YOUVERSION_MAX_RETRIES", 5),
+YouVersionRetryBaseMS:    getEnvInt("YOUVERSION_RETRY_BASE_MS", 1000),
+YouVersionCheckpointFile: getEnv("YOUVERSION_CHECKPOINT_FILE", ""),
 }
 }
 
@@ -117,6 +144,18 @@ if n, err := strconv.Atoi(value); err == nil {
 return n
 }
 log.Printf("Config warning: %s=%q is not a valid integer, using default %d", key, value, fallback)
+}
+return fallback
+}
+
+// getEnvFloat64 returns the float64 env var value for key, or fallback when it
+// is unset or not a valid float (a warning is logged in the latter case).
+func getEnvFloat64(key string, fallback float64) float64 {
+if value, exists := os.LookupEnv(key); exists {
+if f, err := strconv.ParseFloat(value, 64); err == nil {
+return f
+}
+log.Printf("Config warning: %s=%q is not a valid float, using default %g", key, value, fallback)
 }
 return fallback
 }

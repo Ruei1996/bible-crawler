@@ -167,11 +167,11 @@ func expectSectionContentInsert(mock sqlmock.Sqlmock) {
 func TestNewYouVersionScraper(t *testing.T) {
 	repo, _ := newMockRepo(t)
 	client := &mockClient{}
-	s := NewYouVersionScraper(repo, client, 36, 111)
+	s := NewYouVersionScraper(repo, client, 312, 111)
 	assert.NotNil(t, s)
 	assert.Equal(t, repo, s.Repo)
 	assert.Equal(t, client, s.Client)
-	assert.Equal(t, 36, s.ChineseBibleID)
+	assert.Equal(t, 312, s.ChineseBibleID)
 	assert.Equal(t, 111, s.EnglishBibleID)
 }
 
@@ -181,7 +181,7 @@ func TestNewYouVersionScraper(t *testing.T) {
 
 func TestSaveVerse_EmptyContent(t *testing.T) {
 	repo, _ := newMockRepo(t)
-	s := NewYouVersionScraper(repo, &mockClient{}, 36, 111)
+	s := NewYouVersionScraper(repo, &mockClient{}, 312, 111)
 	err := s.saveVerse(uuid.New(), uuid.New(), 1, LangEnglish, "")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "empty passage content")
@@ -191,7 +191,7 @@ func TestSaveVerse_GetOrCreateSectionError(t *testing.T) {
 	repo, mock := newMockRepo(t)
 	mock.ExpectQuery(qre(sqlSelectSection)).WillReturnError(fmt.Errorf("db error"))
 
-	s := NewYouVersionScraper(repo, &mockClient{}, 36, 111)
+	s := NewYouVersionScraper(repo, &mockClient{}, 312, 111)
 	err := s.saveVerse(uuid.New(), uuid.New(), 1, LangEnglish, "verse text")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "GetOrCreateSection")
@@ -204,7 +204,7 @@ func TestSaveVerse_UpsertSectionContentError(t *testing.T) {
 	expectSectionInsert(mock, secID)
 	mock.ExpectQuery(qre(sqlSelectSectionContent)).WillReturnError(fmt.Errorf("db error"))
 
-	s := NewYouVersionScraper(repo, &mockClient{}, 36, 111)
+	s := NewYouVersionScraper(repo, &mockClient{}, 312, 111)
 	err := s.saveVerse(uuid.New(), uuid.New(), 1, LangEnglish, "verse text")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "UpsertSectionContent")
@@ -217,7 +217,7 @@ func TestSaveVerse_SuccessEnglish(t *testing.T) {
 	expectSectionInsert(mock, secID)
 	expectSectionContentInsert(mock)
 
-	s := NewYouVersionScraper(repo, &mockClient{}, 36, 111)
+	s := NewYouVersionScraper(repo, &mockClient{}, 312, 111)
 	err := s.saveVerse(uuid.New(), uuid.New(), 1, LangEnglish, "In the beginning")
 	require.NoError(t, err)
 	assert.NoError(t, mock.ExpectationsWereMet())
@@ -229,7 +229,7 @@ func TestSaveVerse_SuccessChinese(t *testing.T) {
 	expectSectionInsert(mock, secID)
 	expectSectionContentInsert(mock)
 
-	s := NewYouVersionScraper(repo, &mockClient{}, 36, 111)
+	s := NewYouVersionScraper(repo, &mockClient{}, 312, 111)
 	err := s.saveVerse(uuid.New(), uuid.New(), 1, LangChinese, "太初，上帝創造了天地。")
 	require.NoError(t, err)
 	assert.NoError(t, mock.ExpectationsWereMet())
@@ -243,7 +243,7 @@ func TestProcessChapter_GetOrCreateChapterError(t *testing.T) {
 	repo, mock := newMockRepo(t)
 	mock.ExpectQuery(qre(sqlSelectChapter)).WillReturnError(fmt.Errorf("db error"))
 
-	s := NewYouVersionScraper(repo, &mockClient{}, 36, 111)
+	s := NewYouVersionScraper(repo, &mockClient{}, 312, 111)
 	chap := ChapterData{ID: "1", Verses: []VerseData{{ID: "1", PassageID: "GEN.1.1"}}}
 	err := s.processChapter(uuid.New(), 1, chap, LangEnglish, 111)
 	require.Error(t, err)
@@ -268,7 +268,7 @@ func TestProcessChapter_UpsertChapterContentError_Continues(t *testing.T) {
 			return &PassageData{Content: "In the beginning"}, nil
 		},
 	}
-	s := NewYouVersionScraper(repo, client, 36, 111)
+	s := NewYouVersionScraper(repo, client, 312, 111)
 	chap := ChapterData{ID: "1", Verses: []VerseData{{ID: "1", PassageID: "GEN.1.1"}}}
 	err := s.processChapter(uuid.New(), 1, chap, LangEnglish, 111)
 	require.NoError(t, err) // processChapter returns nil; content error is logged
@@ -284,7 +284,7 @@ func TestProcessChapter_InvalidVerseIDSkipped(t *testing.T) {
 
 	s := NewYouVersionScraper(repo, &mockClient{getPassageFunc: func(int, string) (*PassageData, error) {
 		return nil, fmt.Errorf("should not be called")
-	}}, 36, 111)
+	}}, 312, 111)
 	chap := ChapterData{
 		ID: "1",
 		Verses: []VerseData{
@@ -317,7 +317,7 @@ func TestProcessChapter_GetPassageError_Continues(t *testing.T) {
 			return &PassageData{Content: "second verse"}, nil
 		},
 	}
-	s := NewYouVersionScraper(repo, client, 36, 111)
+	s := NewYouVersionScraper(repo, client, 312, 111)
 	chap := ChapterData{
 		ID: "1",
 		Verses: []VerseData{
@@ -343,7 +343,7 @@ func TestProcessChapter_SaveVerseError_Logged(t *testing.T) {
 			return &PassageData{Content: ""}, nil // empty content triggers error
 		},
 	}
-	s := NewYouVersionScraper(repo, client, 36, 111)
+	s := NewYouVersionScraper(repo, client, 312, 111)
 	chap := ChapterData{
 		ID:     "1",
 		Verses: []VerseData{{ID: "1", PassageID: "GEN.1.1"}},
@@ -366,7 +366,7 @@ func TestProcessChapter_SuccessEnglish(t *testing.T) {
 			return &PassageData{Content: "In the beginning"}, nil
 		},
 	}
-	s := NewYouVersionScraper(repo, client, 36, 111)
+	s := NewYouVersionScraper(repo, client, 312, 111)
 	chap := ChapterData{ID: "1", Verses: []VerseData{{ID: "1", PassageID: "GEN.1.1"}}}
 	err := s.processChapter(uuid.New(), 1, chap, LangEnglish, 111)
 	require.NoError(t, err)
@@ -386,9 +386,9 @@ func TestProcessChapter_SuccessChinese(t *testing.T) {
 			return &PassageData{Content: "太初，上帝創造了天地。"}, nil
 		},
 	}
-	s := NewYouVersionScraper(repo, client, 36, 111)
+	s := NewYouVersionScraper(repo, client, 312, 111)
 	chap := ChapterData{ID: "1", Verses: []VerseData{{ID: "1", PassageID: "GEN.1.1"}}}
-	err := s.processChapter(uuid.New(), 1, chap, LangChinese, 36)
+	err := s.processChapter(uuid.New(), 1, chap, LangChinese, 312)
 	require.NoError(t, err)
 	assert.NoError(t, mock.ExpectationsWereMet())
 }
@@ -415,7 +415,7 @@ func TestCrawlVerses_ProcessChapterError_Logged(t *testing.T) {
 	setup.enBooks[0].Chapters = []ChapterData{{ID: "1", Verses: nil}}
 	setup.zhBooks[0].Chapters = []ChapterData{{ID: "1", Verses: nil}}
 
-	s := NewYouVersionScraper(repo, &mockClient{}, 36, 111)
+	s := NewYouVersionScraper(repo, &mockClient{}, 312, 111)
 	s.crawlVerses(setup) // must not panic
 	assert.NoError(t, mock.ExpectationsWereMet())
 }
@@ -452,7 +452,7 @@ func TestCrawlVerses_Success_BothLanguages(t *testing.T) {
 		zhBooks: zhBooks.Data,
 	}
 
-	s := NewYouVersionScraper(repo, client, 36, 111)
+	s := NewYouVersionScraper(repo, client, 312, 111)
 	s.crawlVerses(setup)
 	assert.NoError(t, mock.ExpectationsWereMet())
 }
@@ -468,7 +468,7 @@ func TestSetupBooks_GetBooksENError(t *testing.T) {
 			return nil, fmt.Errorf("network error")
 		},
 	}
-	s := NewYouVersionScraper(repo, client, 36, 111)
+	s := NewYouVersionScraper(repo, client, 312, 111)
 	_, err := s.setupBooks()
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "GetBooks(EN=111)")
@@ -484,10 +484,10 @@ func TestSetupBooks_GetBooksZHError(t *testing.T) {
 			return nil, fmt.Errorf("zh api error")
 		},
 	}
-	s := NewYouVersionScraper(repo, client, 36, 111)
+	s := NewYouVersionScraper(repo, client, 312, 111)
 	_, err := s.setupBooks()
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "GetBooks(ZH=36)")
+	assert.Contains(t, err.Error(), "GetBooks(ZH=312)")
 }
 
 func TestSetupBooks_BookCountMismatch(t *testing.T) {
@@ -500,7 +500,7 @@ func TestSetupBooks_BookCountMismatch(t *testing.T) {
 			return &BooksResponse{Data: []BookData{{ID: "GEN"}}}, nil
 		},
 	}
-	s := NewYouVersionScraper(repo, client, 36, 111)
+	s := NewYouVersionScraper(repo, client, 312, 111)
 	_, err := s.setupBooks()
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "book count mismatch")
@@ -513,7 +513,7 @@ func TestSetupBooks_ZeroBooks(t *testing.T) {
 			return &BooksResponse{Data: []BookData{}}, nil
 		},
 	}
-	s := NewYouVersionScraper(repo, client, 36, 111)
+	s := NewYouVersionScraper(repo, client, 312, 111)
 	_, err := s.setupBooks()
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "0 books")
@@ -533,7 +533,7 @@ func TestSetupBooks_GetOrCreateBookError_AllFail(t *testing.T) {
 			}}, nil
 		},
 	}
-	s := NewYouVersionScraper(repo, client, 36, 111)
+	s := NewYouVersionScraper(repo, client, 312, 111)
 	_, err := s.setupBooks()
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "no books were successfully written")
@@ -559,7 +559,7 @@ func TestSetupBooks_GetOrCreateBookError_SomeFail(t *testing.T) {
 			}}, nil
 		},
 	}
-	s := NewYouVersionScraper(repo, client, 36, 111)
+	s := NewYouVersionScraper(repo, client, 312, 111)
 	setup, err := s.setupBooks()
 	require.NoError(t, err)
 	assert.Len(t, setup.metas, 1)
@@ -580,7 +580,7 @@ func TestSetupBooks_UpsertBookContentENError_Continues(t *testing.T) {
 			return oneBook("GEN", "Genesis", 0), nil
 		},
 	}
-	s := NewYouVersionScraper(repo, client, 36, 111)
+	s := NewYouVersionScraper(repo, client, 312, 111)
 	setup, err := s.setupBooks()
 	require.NoError(t, err) // errors are logged, not returned
 	assert.Len(t, setup.metas, 1)
@@ -600,7 +600,7 @@ func TestSetupBooks_UpsertBookContentZHError_Continues(t *testing.T) {
 			return oneBook("GEN", "Genesis", 0), nil
 		},
 	}
-	s := NewYouVersionScraper(repo, client, 36, 111)
+	s := NewYouVersionScraper(repo, client, 312, 111)
 	setup, err := s.setupBooks()
 	require.NoError(t, err)
 	assert.Len(t, setup.metas, 1)
@@ -619,7 +619,7 @@ func TestSetupBooks_Success(t *testing.T) {
 			return oneBook("GEN", "Genesis", 1), nil
 		},
 	}
-	s := NewYouVersionScraper(repo, client, 36, 111)
+	s := NewYouVersionScraper(repo, client, 312, 111)
 	setup, err := s.setupBooks()
 	require.NoError(t, err)
 	require.Len(t, setup.metas, 1)
@@ -639,7 +639,7 @@ func TestRun_SetupBooksError(t *testing.T) {
 			return nil, fmt.Errorf("api down")
 		},
 	}
-	s := NewYouVersionScraper(repo, client, 36, 111)
+	s := NewYouVersionScraper(repo, client, 312, 111)
 	err := s.Run()
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "phase 1 failed")
@@ -676,7 +676,7 @@ func TestRun_Success(t *testing.T) {
 			return &PassageData{Content: "verse content"}, nil
 		},
 	}
-	s := NewYouVersionScraper(repo, client, 36, 111)
+	s := NewYouVersionScraper(repo, client, 312, 111)
 	err := s.Run()
 	require.NoError(t, err)
 	assert.NoError(t, mock.ExpectationsWereMet())

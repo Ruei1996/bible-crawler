@@ -3,7 +3,7 @@
 這是一個 Go 語言聖經爬蟲，將聖經內容存入結構嚴謹的 PostgreSQL 資料庫。支援**兩種資料來源**，寫入完全相同的資料表 Schema，可互換使用：
 
 - **HTML 爬蟲**（`cmd/crawler`）：從 `springbible.fhl.net` 抓取和合本與 BBE。
-- **YouVersion API 爬蟲**（`cmd/youversion-crawler`）：透過 [YouVersion Platform REST API](https://developers.youversion.com/api/bibles) 取得聖經內容。無需 Spec 規格檔，所有結構直接從 API 取得。預設使用 NIV 2011（ID 111）英文版及 CCB 当代圣经（ID 36）中文版；待取得授權後可設定 `YOUVERSION_CHINESE_BIBLE_ID=46` 切換至新標點和合本。
+- **YouVersion API 爬蟲**（`cmd/youversion-crawler` + `cmd/youversion-importer`）：透過 [YouVersion Platform REST API](https://developers.youversion.com/api/bibles) 取得聖經內容。無需 Spec 規格檔，所有結構直接從 API 取得。支援兩種子模式：**循序模式**（直接寫入 DB，原始行為）與**平行模式**（N 個 worker + 流量限制 + 指數退避重試 + JSONL 斷點續傳檔案）。預設使用 NIV 2011（ID 111）英文版及 CSB 中文標準譯本（ID 312）繁體中文版。
 
 ## 🌟 功能特色
 
@@ -279,16 +279,25 @@ SOURCE_EN_URL=https://springbible.fhl.net/Bible2/cgic201/read201.cgi?na=0&chap=%
 CRAWLER_PARALLELISM=5
 CRAWLER_DELAY_MS=200
 CRAWLER_RANDOM_DELAY_MS=100
-HTTP_TIMEOUT_SEC=30
+HTTP_TIMEOUT_SEC=10
 
 # ── YouVersion Platform API（youversion-crawler 專用）────────────────────────
 # 在 https://platform.youversion.com 申請 App Key
 YOUVERSION_API_KEY=your-app-key-here
 YOUVERSION_BASE_URL=https://api.youversion.com/v1   # 選填，此為預設值
-# 預設 Bible ID：111 = NIV 2011（英文），36 = CCB 当代圣经（中文）
-# 取得 新標點和合本（ID 46）授權後，可改為 YOUVERSION_CHINESE_BIBLE_ID=46
+# 預設 Bible ID：111 = NIV 2011（英文），312 = CSB 中文標準譯本（繁體中文）
+# 若需使用其他中文譯本，將 YOUVERSION_CHINESE_BIBLE_ID 設為對應的 Bible ID 即可
 YOUVERSION_ENGLISH_BIBLE_ID=111
-YOUVERSION_CHINESE_BIBLE_ID=36
+YOUVERSION_CHINESE_BIBLE_ID=312
+
+# ── YouVersion 平行模式（選填）───────────────────────────────────────────────
+# 設定 YOUVERSION_CHECKPOINT_FILE 可啟用平行爬取模式。
+# 留空（或不設定）則使用循序模式（原始行為，直接寫入 DB）。
+YOUVERSION_CHECKPOINT_FILE=verses.jsonl  # 設定檔案路徑以啟用平行模式
+YOUVERSION_WORKERS=20              # 平行 goroutine 數量（需 ≥ RPS）
+YOUVERSION_RATE_LIMIT_RPS=15.0    # 每秒最大請求數（≥15 可在 1 小時內完成約 6.2 萬節）
+YOUVERSION_MAX_RETRIES=3           # 5xx/網路錯誤最大重試次數（預設：3）
+YOUVERSION_RETRY_BASE_MS=500       # 初始退避間隔毫秒，每次加倍（預設：500）
 ```
 
 ### 步驟 4：建置 Spec 規格檔（首次或需更新時執行）
@@ -341,7 +350,15 @@ Bible Crawler finished successfully.
 #### 選項 B — YouVersion API 爬蟲 ✨
 
 **無需規格檔**，直接透過 YouVersion REST API 取得聖經內容。
-需在 `.env` 設定 `YOUVERSION_API_KEY`（以及選擇性的 Bible ID 設定）。
+需在 `.env` 設定 `YOUVERSION_API_KEY`。
+
+YouVersion 爬蟲的 Phase 2（經文爬取）提供**兩種子模式**：
+
+---
+
+##### B-1. 循序模式（預設 — 無需額外設定）
+
+每次抓取一節後直接寫入資料庫，簡單安全，僅需核心環境變數。
 
 ```bash
 go run cmd/youversion-crawler/main.go
@@ -353,17 +370,65 @@ Connected to database successfully
 Starting YouVersion Bible Crawler...
 YouVersion Scraper: starting...
 Phase 1: fetching book list for English Bible (ID 111)...
-Phase 1: fetching book list for Chinese Bible (ID 36)...
+Phase 1: fetching book list for Chinese Bible (ID 312)...
 Phase 1: 66/66 books ready.
 Phase 2: crawling verses...
 Phase 2: language=english bibleID=111
-Phase 2: language=chinese bibleID=36
+Phase 2: language=chinese bibleID=312
 Phase 2: done.
 YouVersion Scraper: done.
 YouVersion Crawler finished successfully.
 ```
 
-> **聖經版本說明**：選項 B 預設使用 NIV 2011（ID 111）英文版與 CCB 当代圣经（ID 36）中文版，兩者皆可免費透過 YouVersion Platform App Key 存取。若需使用新標點和合本（ID 46，繁體中文），請至 `https://platform.youversion.com/bibles` 申請出版商授權，通過後在 `.env` 設定 `YOUVERSION_CHINESE_BIBLE_ID=46` 即可。
+---
+
+##### B-2. 平行模式（建議 — 在 `.env` 設定 `YOUVERSION_CHECKPOINT_FILE`）
+
+使用 worker pool + token-bucket 流量限制 + 指數退避重試。結果寫入 JSONL 斷點檔案而非資料庫，支援**中斷後接續執行**。
+
+**Phase 2A — 爬取並寫入 JSONL：**
+
+確認 `.env` 已設定平行模式相關參數（詳見步驟 3），然後直接執行：
+
+```bash
+go run cmd/youversion-crawler/main.go
+```
+
+預期輸出：
+```text
+Connected to database successfully
+Parallel mode: workers=20 rps=15.0 maxRetries=3 checkpoint="verses.jsonl"
+Starting YouVersion Bible Crawler...
+YouVersion Scraper: starting...
+Phase 1: 66/66 books ready.
+Phase 2: crawling verses (parallel)...
+Phase 2: 0 verses already in checkpoint
+Phase 2: 62213/62213 verses remaining
+Phase 2: done. written=62197 already-done=0 write-errors=0
+YouVersion Scraper: done.
+YouVersion Crawler finished successfully.
+```
+
+> **優雅停止**：執行中按 `Ctrl+C`，Worker 完成當前節後安全停止並 flush 斷點檔案。重新執行同樣指令即可從中斷處繼續，已完成的節自動跳過。
+
+> **404 回應**（例如 `MAT.17.21`、`MAT.18.11`）為**正常現象**，自動靜默跳過。NIV 等現代譯本刻意省略部分節號，並非錯誤。
+
+**Phase 2B — 將 JSONL 匯入資料庫：**
+
+```bash
+go run cmd/youversion-importer/main.go
+```
+
+預期輸出：
+```text
+Import complete: total=62197 written=62197 skipped=0
+```
+
+> 匯入程式會自動從 `.env` 讀取 `YOUVERSION_CHECKPOINT_FILE`，無需在指令行額外帶入環境變數。完全冪等，可安全重複執行；內部使用與其他 repository 相同的 `SELECT→INSERT→SELECT` 模式。
+
+---
+
+> **聖經版本說明**：選項 B 預設使用 NIV 2011（ID 111）英文版與 CSB 中文標準譯本（ID 312，繁體中文）中文版，兩者皆可免費透過 YouVersion Platform App Key 存取。若需使用其他中文譯本，在 `.env` 設定 `YOUVERSION_CHINESE_BIBLE_ID=<id>` 即可。
 
 ### 步驟 6：驗證資料（選擇性）
 
@@ -443,41 +508,52 @@ Backup table dropped.
 bible-crawler/
 ├── cmd/
 │   ├── crawler/
-│   │   └── main.go           # 主爬蟲進入點（Stage 1 + 2）
+│   │   └── main.go               # 主爬蟲進入點（Stage 1 + 2）
 │   ├── migrate/
-│   │   └── main.go           # 跨 schema UUID 備份/還原（--phase=backup|restore）
-│   └── spec-builder/
-│       └── main.go           # Stage 0：發現節數，寫入 JSON 規格檔
+│   │   └── main.go               # 跨 schema UUID 備份/還原（--phase=backup|restore）
+│   ├── spec-builder/
+│   │   └── main.go               # Stage 0：發現節數，寫入 JSON 規格檔
+│   ├── youversion-crawler/
+│   │   └── main.go               # YouVersion API 爬蟲：Phase 1（DB 建置）+ Phase 2（經文爬取）
+│   └── youversion-importer/
+│       └── main.go               # 讀取 JSONL 斷點檔案 → 批次寫入 PostgreSQL
 ├── internal/
-│   ├── config/               # 環境變數載入（所有 .env 欄位）
-│   │   └── config_test.go    # 單元測試 — 100 % 覆蓋率
-│   ├── database/             # PostgreSQL 連線設定
-│   │   └── database_test.go  # 整合測試（build tag: integration）
-│   ├── migration/            # 跨 schema 聖經引用備份/還原邏輯
-│   │   └── migration_test.go # 單元測試（go-sqlmock）— 100 % 覆蓋率
-│   ├── model/                # 對應資料庫的 Go Struct
-│   ├── repository/           # 冪等資料存取層（所有 SQL）
+│   ├── config/                   # 環境變數載入（所有 .env 欄位）
+│   │   └── config_test.go        # 單元測試 — 100 % 覆蓋率
+│   ├── database/                 # PostgreSQL 連線設定
+│   │   └── database_test.go      # 整合測試（build tag: integration）
+│   ├── migration/                # 跨 schema 聖經引用備份/還原邏輯
+│   │   └── migration_test.go     # 單元測試（go-sqlmock）— 100 % 覆蓋率
+│   ├── model/                    # 對應資料庫的 Go Struct
+│   ├── repository/               # 冪等資料存取層（所有 SQL）
 │   │   ├── repository_test.go             # 單元測試（go-sqlmock）— 100 % 覆蓋率
 │   │   └── repository_integration_test.go # 整合測試（build tag: integration）
-│   ├── scraper/              # Colly 爬蟲核心邏輯
+│   ├── scraper/                  # Colly HTML 爬蟲核心邏輯
 │   │   ├── scraper_test.go             # 單元測試 — 96 % 覆蓋率
 │   │   └── scraper_integration_test.go  # 整合測試（build tag: integration）
-│   ├── spec/                 # JSON 規格檔載入（BibleSpec, BookSpec）
-│   │   └── spec_test.go      # 單元測試 — 100 % 覆蓋率
-│   ├── testhelper/           # 共用 Testcontainers 輔助（僅 integration build tag）
+│   ├── spec/                     # JSON 規格檔載入（BibleSpec, BookSpec）
+│   │   └── spec_test.go          # 單元測試 — 100 % 覆蓋率
+│   ├── testhelper/               # 共用 Testcontainers 輔助（僅 integration build tag）
 │   │   └── postgres.go
-│   └── utils/                # Big5→UTF-8 解碼、文字清理
-│       └── encoding_test.go  # 單元測試 — 83 % 覆蓋率
-├── bible_books_zh.json       # 和合本各章節數（由 spec-builder 自動產生）
-├── bible_books_en.json       # BBE 各章節數（由 spec-builder 自動產生）
-├── validation.sql            # PostgreSQL 驗證查詢 + 雙語章節內容查詢
-├── .env                      # 本機 DB 連線設定與調校（不納入版控）
-├── .env.example              # .env 範本（所有欄位均有說明）
+│   ├── utils/                    # Big5→UTF-8 解碼、文字清理
+│   │   └── encoding_test.go      # 單元測試 — 83 % 覆蓋率
+│   └── youversion/               # YouVersion Platform API 客戶端 + 爬蟲
+│       ├── checkpoint.go         # JSONL 斷點：VerseRecord、Append、LoadCompleted
+│       ├── client.go             # HTTP 客戶端（GetBooks、GetPassage…）
+│       ├── client_test.go        # 單元測試 — 100 % 覆蓋率
+│       ├── scraper.go            # 爬蟲協調器：setupBooks、crawlVerses、crawlVersesParallel
+│       ├── scraper_test.go       # 單元測試 — 100 % 覆蓋率
+│       └── types.go              # API 回應型別（BooksResponse、PassageData…）
+├── bible_books_zh.json           # 和合本各章節數（由 spec-builder 自動產生）
+├── bible_books_en.json           # BBE 各章節數（由 spec-builder 自動產生）
+├── validation.sql                # PostgreSQL 驗證查詢 + 雙語章節內容查詢
+├── .env                          # 本機 DB 連線設定與調校（不納入版控）
+├── .env.example                  # .env 範本（所有欄位均有說明）
 ├── go.mod
 └── README_ZH.md
 ```
 
-> **注意**：已編譯的執行檔（`spec-builder`、`crawler`）已列入 `.gitignore`，請勿提交至版本控制。請一律使用 `go run cmd/<name>/main.go` 執行。
+> **注意**：已編譯的執行檔已列入 `.gitignore`，請勿提交至版本控制。請一律使用 `go run cmd/<name>/main.go` 執行。
 
 ## ⚠️ 常見問題排除
 
@@ -492,6 +568,9 @@ A：`validation.sql` 第 5 節列出的版本差異章節為正常現象。第 1
 
 **Q：資料出現亂碼（Mojibake）**  
 A：爬蟲已內建 Big5 轉 UTF-8 處理。請勿修改 `internal/utils/encoding.go` 的編碼邏輯。
+
+**Q：YouVersion 爬蟲記錄大量「status 404」錯誤**  
+A：404 回應為**正常現象**。NIV 等現代譯本刻意省略部分節號（例如 MAT.17.21、MAT.18.11、MRK.7.16 等），循序與平行模式均自動靜默跳過這些節。只有 429 或 5xx 回應才會觸發重試。
 
 **Q：`bible_books_zh.json` 與 `bible_books_en.json` 節數完全相同**  
 A：請重新執行 `cmd/spec-builder/main.go`。規格檔必須從網站即時抓取才能正確反映兩語言的版本差異。

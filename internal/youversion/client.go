@@ -14,6 +14,22 @@ const (
 	headerAPIKey = "x-yvp-app-key"
 )
 
+// HTTPStatusError is returned by get() when the server responds with a
+// non-200 HTTP status. Callers can inspect the StatusCode field via
+// errors.As to decide whether to retry (5xx, 429) or skip (404).
+// Error() preserves the original "GET <url>: status <code> — <body>" format
+// so that all existing tests that check err.Error() continue to pass.
+type HTTPStatusError struct {
+	Method     string
+	URL        string
+	StatusCode int
+	Body       string
+}
+
+func (e *HTTPStatusError) Error() string {
+	return fmt.Sprintf("%s %s: status %d — %s", e.Method, e.URL, e.StatusCode, e.Body)
+}
+
 // Client is an HTTP client for the YouVersion Platform API.
 // All requests include the required x-yvp-app-key header automatically.
 type Client struct {
@@ -56,7 +72,12 @@ func (c *Client) get(path string, dest any) error {
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("GET %s: status %d — %s", u, resp.StatusCode, string(body))
+		return &HTTPStatusError{
+			Method:     http.MethodGet,
+			URL:        u,
+			StatusCode: resp.StatusCode,
+			Body:       string(body),
+		}
 	}
 
 	if err := json.Unmarshal(body, dest); err != nil {
@@ -151,7 +172,7 @@ func (c *Client) GetVOTD() (*VOTDResponse, error) {
 // whole chapters ("GEN.1").
 //
 // Access depends on the Bible version's licensing agreement. Translations
-// without a publisher restriction (e.g. NIV11 ID 111, CCB ID 36) return
+// without a publisher restriction (e.g. NIV11 ID 111, CSB 中文標準譯本 ID 312) return
 // text freely. Restricted translations (e.g. 新標點和合本 ID 46) return a 403 error.
 func (c *Client) GetPassage(bibleID int, passageID string) (*PassageData, error) {
 	path := fmt.Sprintf("/bibles/%d/passages/%s", bibleID, url.PathEscape(passageID))

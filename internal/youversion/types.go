@@ -4,7 +4,7 @@
 // Passage text is returned by GET /bibles/{id}/passages/{passageID}.
 // Access depends on Bible version licensing: some translations (e.g. 新標點和合本 ID 46)
 // require a separate publisher agreement and return 403 without one.
-// Free/unlicensed translations such as NIV11 (ID 111) and CCB (ID 36) return text freely.
+// Free/unlicensed translations such as NIV11 (ID 111) and CSB 中文標準譯本 (ID 312) return text freely.
 package youversion
 
 import "encoding/json"
@@ -89,7 +89,7 @@ type VerseData struct {
 //   - Whole chapter: "GEN.1"
 //
 // Access depends on licensing: translations with publisher restrictions (e.g. 新標點和合本,
-// ID 46) return HTTP 403. Open/licensed translations like NIV11 (ID 111) and CCB (ID 36)
+// ID 46) return HTTP 403. Open/licensed translations like NIV11 (ID 111) and CSB 中文標準譯本 (ID 312)
 // return text without additional agreement.
 type PassageData struct {
 	ID        string `json:"id"`        // e.g. "GEN.1.1" or "GEN.1.1-3"

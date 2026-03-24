@@ -11,12 +11,12 @@
 // Selected Bible versions
 //
 //	Chinese (licensed): Bible ID 46 — 新標點和合本, 神版 (CUNP-Shen, zh-Hant-TW)
-//	Chinese (open):     Bible ID 36 — 当代圣经 (CCB, simplified, no extra license needed)
+//	Chinese (open):     Bible ID 312 — 中文標準譯本 (CSB, Chinese Standard Bible, traditional, no extra license needed)
 //	English:            Bible ID 111 — New International Version 2011 (NIV11)
 //
 // Passage text endpoint: GET /bibles/{id}/passages/{passageID}
 // Returns actual verse text. Access depends on Bible version licensing:
-//   - NIV11 (111) and CCB (36): freely accessible
+//   - NIV11 (111) and CSB (312): freely accessible
 //   - CUNP-Shen (46): requires YouVersion publisher license (returns 403 without it)
 //
 // Usage:
@@ -40,9 +40,9 @@ const (
 	// chineseBibleID is the YouVersion ID for 新標點和合本, 神版 (zh-Hant-TW).
 	// Passage text for this version requires a YouVersion publisher license.
 	chineseBibleID = 46
-	// ccbBibleID is the YouVersion ID for 当代圣经 (CCB, simplified Chinese).
+	// csbBibleID is the YouVersion ID for 中文標準譯本 (CSB, Chinese Standard Bible, traditional Chinese).
 	// Passage text is accessible without extra licensing.
-	ccbBibleID = 36
+	csbBibleID = 312
 	// englishBibleID is the YouVersion ID for New International Version 2011.
 	// Passage text is accessible without extra licensing.
 	englishBibleID = 111
@@ -144,13 +144,13 @@ func main() {
 			APIBaseURL: cfg.YouVersionBaseURL,
 			Note: "The YouVersion Platform API (v1) provides Bible structure AND verse text content. " +
 				"Verse text is available via GET /bibles/{id}/passages/{passageID}. " +
-				"Access depends on translation licensing: NIV11 (ID 111) and CCB (ID 36) are freely accessible. " +
+				"Access depends on translation licensing: NIV11 (ID 111) and CSB 中文標準譯本 (ID 312) are freely accessible. " +
 				"新標點和合本 (ID 46) requires a YouVersion publisher license agreement and returns HTTP 403 without one.",
 			SelectedBibles: selectedBiblesMeta{
 				ChineseID:       chineseBibleID,
 				ChineseName:     "新標點和合本, 神版 (CUNP-Shen, zh-Hant-TW) — requires publisher license for passage text",
-				ChineseOpenID:   ccbBibleID,
-				ChineseOpenName: "当代圣经 (CCB, simplified Chinese) — passage text freely accessible",
+				ChineseOpenID:   csbBibleID,
+				ChineseOpenName: "中文標準譯本 (CSB, Chinese Standard Bible, traditional Chinese) — passage text freely accessible",
 				EnglishID:       englishBibleID,
 				EnglishName:     "New International Version 2011 (NIV11) — passage text freely accessible",
 			},
@@ -257,7 +257,7 @@ func main() {
 	}
 	bibleTests := []passageTestCase{
 		{englishBibleID, "NIV11 (New International Version 2011)"},
-		{ccbBibleID, "CCB (当代圣经, simplified Chinese)"},
+		{csbBibleID, "CSB (中文標準譯本, Chinese Standard Bible, traditional Chinese)"},
 		{chineseBibleID, "CUNP-Shen (新標點和合本, 神版, zh-Hant-TW)"},
 	}
 
@@ -278,7 +278,7 @@ func main() {
 	// Collect text samples for accessible Bible versions.
 	accessibleBibles := []passageTestCase{
 		{englishBibleID, "NIV11"},
-		{ccbBibleID, "CCB"},
+		{csbBibleID, "CSB"},
 	}
 	samplePassageIDs := []struct {
 		id    string
