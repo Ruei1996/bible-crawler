@@ -11,6 +11,8 @@
 --   SECTION 4 — Spec-driven structural check (expected vs actual chapters)
 --   SECTION 5 — Versification-difference audit (ZH vs EN section counts)
 --   SECTION 6 — Chapter content viewer: query by book name + chapter number
+--   SECTION 7 — Missing verse finder: show only absent (verse, language) pairs
+--              for a given book + chapter
 --
 -- A fully loaded and repaired database returns:
 --   • 0 rows  in sections 1, 2, 3, 4, 5
@@ -338,3 +340,74 @@ WHERE      bc.sort = p.chapter_num_param
 ORDER BY
     bsc.language ASC,   -- 'chinese' < 'english' alphabetically → chinese rows first
     bs.sort      ASC;   -- integer verse number: 1, 2, 3, … (not string "1","10","2")
+
+
+-- ── SECTION 7: Missing verse finder (per book + chapter) ─────────
+-- Lists ONLY the (verse, language) pairs that have NO content row in the DB.
+-- 0 rows = the chapter is fully complete in both languages.
+--
+-- ▶ CHANGE THESE TWO VALUES BEFORE RUNNING:
+--     • book_name_param  → Chinese OR English book name
+--                          e.g. '撒母耳記下'  or  '2 Samuel'
+--     • chapter_num_param → chapter number (integer)
+--
+-- Output columns:
+--   book_name_param   — the book name you supplied
+--   chapter_num_param — the chapter number you supplied
+--   verse_num         — 1-based verse number (bs.sort) of the missing content
+--   language          — 'chinese' | 'english'  (which language is absent)
+--   title             — always '⚠ MISSING' (content row does not exist in DB)
+--
+-- Interpretation:
+--   Each row = one (verse, language) gap.
+--   Common causes:
+--     • YouVersion API returned 404 for this verse in that translation
+--       (versification difference — e.g. NIV omits MAT.17.21, CSB omits 2SA.3.10)
+--     • Crawler was interrupted before this verse was fetched
+
+WITH params AS (
+    -- ── Set your query parameters here ────────────────────────────
+    SELECT
+        '撒母耳記下'  AS book_name_param,   -- book name: Chinese OR English
+        3             AS chapter_num_param   -- chapter number (integer)
+    -- ──────────────────────────────────────────────────────────────
+),
+target_book AS (
+    -- Resolve book ID from either Chinese or English name.
+    -- LIMIT 1 guards against accidental duplicates in bible_book_contents.
+    SELECT bbc.bible_book_id
+    FROM   bibles.bible_book_contents bbc
+    CROSS JOIN params p
+    WHERE  bbc.title = p.book_name_param
+    LIMIT  1
+),
+all_verse_lang_pairs AS (
+    -- Full expected set: every verse in the chapter × both languages.
+    -- This is what we SHOULD have content for.
+    SELECT
+        bs.id   AS section_id,
+        bs.sort AS verse_num,
+        lang.language
+    FROM       bibles.bible_sections  bs
+    JOIN       bibles.bible_chapters  bc  ON bc.id           = bs.bible_chapter_id
+    JOIN       bibles.bible_books     bb  ON bb.id           = bc.bible_book_id
+    JOIN       target_book            tb  ON tb.bible_book_id = bb.id
+    CROSS JOIN (VALUES ('chinese'), ('english')) AS lang(language)
+    CROSS JOIN params p
+    WHERE      bc.sort = p.chapter_num_param
+)
+SELECT
+    p.book_name_param,
+    p.chapter_num_param,
+    avlp.verse_num,
+    avlp.language,
+    '⚠ MISSING'::TEXT                  AS title  -- content row absent; cannot retrieve title
+FROM       all_verse_lang_pairs        avlp
+LEFT  JOIN bibles.bible_section_contents bsc
+           ON  bsc.bible_section_id = avlp.section_id
+           AND bsc.language         = avlp.language
+CROSS JOIN params p
+WHERE      bsc.id IS NULL             -- keep only the gaps (missing content rows)
+ORDER BY
+    avlp.verse_num ASC,               -- natural verse order (integer, not string)
+    avlp.language  ASC;               -- 'chinese' before 'english' within same verse

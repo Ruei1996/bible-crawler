@@ -92,15 +92,6 @@ const (
 
 	// logProgressEvery controls how often import progress is logged (in verses).
 	logProgressEvery = 1_000
-
-	// chapTitleEnglish is the English chapter title template.
-	chapTitleEnglish = "Chapter %d"
-	// chapTitleChinese is the Chinese chapter title template.
-	chapTitleChinese = "第 %d 章"
-	// verseTitleEnglish is the English verse title template.
-	verseTitleEnglish = "verse %d"
-	// verseTitleChinese is the Chinese verse title template.
-	verseTitleChinese = "第%d節"
 )
 
 // importJSONL streams the JSONL file at path and upserts each verse into the DB.
@@ -211,13 +202,9 @@ func importVerse(
 	// Write chapter content (title) once per chapter per language.
 	ck := chapKey{chapID, rec.Lang}
 	if !writtenChapters[ck] {
-		// The YouVersion API does not return chapter titles, so we synthesise
-		// them using each language's conventional numeric format.
-		chapTitle := fmt.Sprintf(chapTitleEnglish, rec.ChapterSort)
-		if rec.Lang == youversion.LangChinese {
-			chapTitle = fmt.Sprintf(chapTitleChinese, rec.ChapterSort)
-		}
-		if err := repo.UpsertChapterContent(chapID, rec.Lang, chapTitle); err != nil {
+		// The YouVersion API does not return chapter titles; synthesise them via
+		// FormatChapterTitle which owns the per-language template strings.
+		if err := repo.UpsertChapterContent(chapID, rec.Lang, youversion.FormatChapterTitle(rec.Lang, rec.ChapterSort)); err != nil {
 			return fmt.Errorf("UpsertChapterContent(sort=%d lang=%s): %w", rec.ChapterSort, rec.Lang, err)
 		}
 		writtenChapters[ck] = true
@@ -228,17 +215,10 @@ func importVerse(
 		return fmt.Errorf("GetOrCreateSection(verse=%d): %w", rec.VerseSort, err)
 	}
 
-	// Synthesise a per-language verse title; the YouVersion API provides no
-	// heading text at the verse level — only passage content.
-	verseTitle := fmt.Sprintf(verseTitleEnglish, rec.VerseSort)
-	if rec.Lang == youversion.LangChinese {
-		verseTitle = fmt.Sprintf(verseTitleChinese, rec.VerseSort)
-	}
-
 	// sub_title (pericope heading) is intentionally left empty: the YouVersion
 	// Platform API v1 does not expose section headings. rec.Content carries the
 	// full verse text as the section body.
-	if err := repo.UpsertSectionContent(secID, rec.Lang, verseTitle, rec.Content); err != nil {
+	if err := repo.UpsertSectionContent(secID, rec.Lang, youversion.FormatVerseTitle(rec.Lang, rec.VerseSort), rec.Content); err != nil {
 		return fmt.Errorf("UpsertSectionContent: %w", err)
 	}
 	return nil

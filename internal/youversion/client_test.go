@@ -45,8 +45,16 @@ func (*errReader) Read(_ []byte) (int, error) { return 0, fmt.Errorf("simulated 
 // ──────────────────────────────────────────────────────────────────────────────
 
 // newTestClient creates a Client pointing at baseURL with a short timeout.
+// httptest servers use http://, so we bypass the https enforcement by
+// constructing the Client directly rather than through the public constructors.
 func newTestClient(baseURL string) *Client {
-	return NewClient(baseURL, "test-api-key", 5)
+	return &Client{
+		baseURL: baseURL,
+		apiKey:  "test-api-key",
+		httpClient: &http.Client{
+			Timeout: 5 * time.Second,
+		},
+	}
 }
 
 // jsonServer returns an httptest.Server that responds to every request with
@@ -81,11 +89,18 @@ func rawServer(t *testing.T, statusCode int, raw string) *httptest.Server {
 // ──────────────────────────────────────────────────────────────────────────────
 
 func TestNewClient(t *testing.T) {
-	c := NewClient("https://api.example.com/v1", "mykey", 30)
+	c, err := NewClient("https://api.example.com/v1", "mykey", 30)
+	require.NoError(t, err)
 	assert.NotNil(t, c)
 	assert.Equal(t, "https://api.example.com/v1", c.baseURL)
 	assert.Equal(t, "mykey", c.apiKey)
 	assert.Equal(t, 30*time.Second, c.httpClient.Timeout)
+}
+
+func TestNewClient_HTTPSchemeRejected(t *testing.T) {
+	_, err := NewClient("http://api.example.com/v1", "mykey", 30)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "https://")
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -94,7 +109,8 @@ func TestNewClient(t *testing.T) {
 
 func TestGet_NewRequestError(t *testing.T) {
 	// An invalid URL scheme causes http.NewRequest to fail.
-	c := NewClient("://invalid-url", "key", 5)
+	// Construct directly (bypassing the https guard) since we want to test get().
+	c := &Client{baseURL: "://invalid-url", apiKey: "key", httpClient: &http.Client{Timeout: 5 * time.Second}}
 	var result BiblesResponse
 	err := c.get(context.Background(), "/test", &result)
 	require.Error(t, err)
@@ -114,12 +130,14 @@ func TestGet_DoError(t *testing.T) {
 
 func TestGet_ReadBodyError(t *testing.T) {
 	// Inject a transport whose response body always fails on Read.
+	// Since we switched to json.NewDecoder (streaming), the read error surfaces
+	// as a decode error: "decode JSON from ...: <read error>".
 	c := newTestClient("http://unused.example.com")
 	c.httpClient = &http.Client{Transport: errBodyTransport{}}
 	var result BiblesResponse
 	err := c.get(context.Background(), "/test", &result)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "read body")
+	assert.Contains(t, err.Error(), "decode JSON from")
 }
 
 func TestGet_NonOKStatus(t *testing.T) {

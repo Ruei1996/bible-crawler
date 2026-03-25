@@ -91,10 +91,24 @@ type VerseData struct {
 // Access depends on licensing: translations with publisher restrictions (e.g. 新標點和合本,
 // ID 46) return HTTP 403. Open/licensed translations like NIV11 (ID 111) and CSB 中文標準譯本 (ID 312)
 // return text without additional agreement.
+//
+// API v1 limitation — sub_title / section headings:
+//
+// The YouVersion Platform API v1 returns exactly three fields per passage: id,
+// content, and reference. There is NO field for pericope headings, section
+// titles, or sub-titles. Verified against live API and the saved
+// youversion-bible-api-result.json sample file.
+//
+// As a consequence, the bibles.bible_section_contents.sub_title column will
+// always be NULL when data originates from this API. This is a confirmed API
+// constraint, not a bug in the crawler. Populating sub_title would require
+// a future API version that exposes headings, or a licensed HTML-scraping
+// approach applied on top of the existing data.
 type PassageData struct {
 	ID        string `json:"id"`        // e.g. "GEN.1.1" or "GEN.1.1-3"
 	Content   string `json:"content"`   // the actual verse text
 	Reference string `json:"reference"` // e.g. "Genesis 1:1" or "Genesis 1:1-3"
+	// The API returns no sub_title/heading field; bibles.bible_section_contents.sub_title will be NULL.
 }
 
 // VOTDResponse is the top-level wrapper returned by GET /verse_of_the_days.

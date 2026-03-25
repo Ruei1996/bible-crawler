@@ -257,7 +257,7 @@ func (s *YouVersionScraper) crawlVersesParallel(ctx context.Context, setup *book
 	completed, err := s.Checkpoint.LoadCompleted()
 	if err != nil {
 		log.Printf("Phase 2: warning: could not load checkpoint: %v — starting fresh", err)
-		completed = make(map[string]struct{})
+		completed = make(map[verseKey]struct{})
 	}
 	log.Printf("Phase 2: %d verses already in checkpoint", len(completed))
 
@@ -271,8 +271,23 @@ func (s *YouVersionScraper) crawlVersesParallel(ctx context.Context, setup *book
 		{LangChinese, s.ChineseBibleID, setup.zhBooks},
 	}
 
+	// Pre-count total API verses (O(chapters ≈ 1,189)) so works can be allocated
+	// with exact capacity in a single make() call, eliminating the ~16 grow-and-copy
+	// reallocation cycles that would otherwise move ~8 MB of verseWork structs.
+	// Both languages share identical chapter/verse counts; EN is used here.
+	var totalAPIVerses int
+	for _, meta := range setup.metas {
+		for _, chap := range setup.enBooks[meta.index].Chapters {
+			totalAPIVerses += len(chap.Verses)
+		}
+	}
+	estimatedCapacity := totalAPIVerses*2 - len(completed) // ×2 for both languages
+	if estimatedCapacity < 0 {
+		estimatedCapacity = 0
+	}
+
 	// Build the work queue, skipping completed verses.
-	var works []verseWork
+	works := make([]verseWork, 0, estimatedCapacity) // single allocation, exact fit
 	for _, lc := range langs {
 		for _, meta := range setup.metas {
 			book := lc.books[meta.index]
@@ -289,7 +304,9 @@ func (s *YouVersionScraper) crawlVersesParallel(ctx context.Context, setup *book
 							verse.ID, bookSort, chapSort, lc.lang)
 						continue
 					}
-						if _, ok := completed[checkpointKey(lc.lang, verse.PassageID)]; ok {
+					// verseKey struct literal is stack-allocated; uses existing string
+					// headers — zero heap allocation vs. checkpointKey string concat.
+					if _, ok := completed[verseKey{lang: lc.lang, passageID: verse.PassageID}]; ok {
 						continue
 					}
 					works = append(works, verseWork{
@@ -410,21 +427,21 @@ func (s *YouVersionScraper) crawlVersesParallel(ctx context.Context, setup *book
 	// fully before returning — the canonical Go fan-in pattern.
 	// Checkpoint.Append still holds its own mutex as a safety net for any
 	// future callers that might write from multiple goroutines.
-	var written, writeErr int
+	var written, writeErrCount int
 	for rec := range resultCh {
 		if appendErr := s.Checkpoint.Append(rec); appendErr != nil {
 			log.Printf("Phase 2: checkpoint write error for %s: %v", rec.PassageID, appendErr)
-			writeErr++
+			writeErrCount++
 		} else {
 			written++
 		}
 	}
 
 	log.Printf("Phase 2: done. written=%d already-done=%d write-errors=%d",
-		written, len(completed), writeErr)
+		written, len(completed), writeErrCount)
 
-	if writeErr > 0 {
-		return fmt.Errorf("%w: count=%d", ErrPhase2WriteFailures, writeErr)
+	if writeErrCount > 0 {
+		return fmt.Errorf("%w: count=%d", ErrPhase2WriteFailures, writeErrCount)
 	}
 	return nil
 }

@@ -137,7 +137,10 @@ func main() {
 		log.Fatal("YOUVERSION_API_KEY is not set — set it in .env or as an environment variable")
 	}
 
-	client := youversion.NewClient(cfg.YouVersionBaseURL, cfg.YouVersionAPIKey, cfg.HTTPTimeoutSec)
+	client, err := youversion.NewClient(cfg.YouVersionBaseURL, cfg.YouVersionAPIKey, cfg.HTTPTimeoutSec)
+	if err != nil {
+		log.Fatalf("Invalid API client configuration: %v", err)
+	}
 
 	result := outputResult{
 		Meta: resultMeta{
@@ -326,7 +329,7 @@ func main() {
 		log.Fatalf("Failed to marshal result to JSON: %v", err)
 	}
 
-	if err := os.WriteFile(outputPath, encoded, 0644); err != nil {
+	if err := os.WriteFile(outputPath, encoded, 0o600); err != nil {
 		log.Fatalf("Failed to write output file %s: %v", outputPath, err)
 	}
 
