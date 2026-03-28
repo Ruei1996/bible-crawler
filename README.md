@@ -1,12 +1,19 @@
 # Bible Crawler
 
-A Go-based Bible crawler that populates a PostgreSQL database with a strict, normalized schema. It supports **two data sources** — the original HTML scraper (`springbible.fhl.net`) and the [YouVersion Platform REST API](https://api.youversion.com/v1) — writing to the exact same schema so both approaches are fully interchangeable.
+A Go-based Bible crawler that populates a PostgreSQL database with a strict, normalized schema. It supports **three data sources** — all writing to the exact same schema so every approach is fully interchangeable.
+
+| Source | Command | Translations | Output |
+|--------|---------|-------------|--------|
+| `springbible.fhl.net` HTML | `cmd/crawler` | 和合本 CUV + BBE | Direct → PostgreSQL |
+| [YouVersion Platform API](https://api.youversion.com/v1) | `cmd/youversion-crawler` + `cmd/youversion-importer` | CSB 中文標準譯本 (ID 312) + NIV 2011 (ID 111) | JSONL checkpoint → PostgreSQL |
+| `bible.com` HTML | `cmd/biblecom-crawler` + `cmd/biblecom-importer` | CUNP-上帝 (ID 414) + NIV (ID 111) | JSON files → PostgreSQL |
 
 ## 🌟 Features
 
-- **Dual Data-Source Support**:
-  - **HTML Scraper** (`cmd/crawler`): crawls Chinese Union Version (和合本) and BBE from `springbible.fhl.net`. Spec-driven — verse counts come from JSON spec files.
-  - **YouVersion API Crawler** (`cmd/youversion-crawler` + `cmd/youversion-importer`): fetches Bible content via the [YouVersion Platform API](https://developers.youversion.com/api/bibles). No spec files needed — all structure is derived from the API itself. Supports two sub-modes: **sequential** (direct DB writes, original behaviour) and **parallel** (N workers + rate-limit + exponential-backoff retry + JSONL checkpoint file for resume). Uses NIV 2011 (ID 111) for English and CSB 中文標準譯本 (ID 312) for Chinese by default.
+- **Three Data Sources**:
+  - **HTML Scraper** (`cmd/crawler`): crawls Chinese Union Version (和合本 CUV) and BBE from `springbible.fhl.net`. Spec-driven — verse counts come from JSON spec files.
+  - **YouVersion API Crawler** (`cmd/youversion-crawler` + `cmd/youversion-importer`): fetches Bible content via the [YouVersion Platform API](https://developers.youversion.com/api/bibles). No spec files needed — all structure is derived from the API. Operates in **parallel mode only** (N workers + rate-limit + exponential-backoff retry + JSONL checkpoint for resume). Uses CSB 中文標準譯本 (ID 312) for Chinese and NIV 2011 (ID 111) for English by default.
+  - **Bible.com HTML Crawler** (`cmd/biblecom-crawler` + `cmd/biblecom-importer`): scrapes `bible.com` HTML pages for CUNP-上帝 (Chinese, ID 414) and NIV (English, ID 111). Step C-1 outputs two JSON files — one per language — for inspection before import. Step C-2 (`cmd/biblecom-importer`) reads both JSON files and upserts all content into PostgreSQL. Supports pericope section headings (`sub_title`) and merged-verse detection.
 - **Spec-Driven Crawling** (HTML path): Per-language verse counts are sourced from `bible_books_zh.json` / `bible_books_en.json`. The crawler never hard-codes verse numbers — all limits come from the JSON spec files.
 - **Three-Stage Workflow** (HTML path):
   - **Stage 0 — Spec Builder**: Crawls every chapter in both languages to discover actual verse counts, then writes the two JSON spec files. Run once (or whenever you need to refresh the spec).
@@ -14,8 +21,9 @@ A Go-based Bible crawler that populates a PostgreSQL database with a strict, nor
   - **Stage 2 — Chapter & Verse Crawl**: Asynchronously fetches 1,189 chapters × 2 languages and persists verses, bounded by each language's spec verse count.
 - **Versification-Aware**: Chinese 和合本 and English BBE differ in chapter boundary placement for several books (e.g. Leviticus, Zechariah). The spec files capture the correct verse count per language so the crawler never writes out-of-range verse rows.
 - **Idempotent Writes**: Every DB write uses a `SELECT → INSERT → SELECT` pattern (race-condition safe for concurrent goroutines). Re-running the crawler never creates duplicates.
-- **Robust Encoding**: Automatically decodes **Big5** (Chinese pages) to UTF-8 before parsing.
-- **Fully Configurable**: Source URLs, concurrency, delays, and HTTP timeout are all set via `.env` — no recompile needed when the website changes.
+- **Robust Encoding**: Automatically decodes **Big5** (Chinese pages from springbible.fhl.net) to UTF-8 before parsing.
+- **Fully Configurable**: Source URLs, concurrency, delays, and HTTP timeouts are all set via `.env` — no recompile needed when a website changes.
+- **Cross-Schema Migration** (`cmd/migrate`): Before truncating the `bibles` schema for a re-crawl, back up and restore UUID references held by other microservice schemas (`activities`, `devotions`) that lack declared FK constraints.
 
 ## 🧪 Testing
 
@@ -223,7 +231,7 @@ Integration tests additionally cover:
 
 ## 🛠 Prerequisites
 
-- **Go** 1.21 or higher
+- **Go** 1.25 or higher
 - **PostgreSQL** 13 or higher
 - **Git**
 
@@ -279,7 +287,7 @@ SOURCE_EN_URL=https://springbible.fhl.net/Bible2/cgic201/read201.cgi?na=0&chap=%
 CRAWLER_PARALLELISM=5
 CRAWLER_DELAY_MS=200
 CRAWLER_RANDOM_DELAY_MS=100
-HTTP_TIMEOUT_SEC=10
+HTTP_TIMEOUT_SEC=30
 
 # ── YouVersion Platform API (youversion-crawler only) ─────────────────────────
 # Obtain an app key at https://platform.youversion.com
@@ -290,14 +298,30 @@ YOUVERSION_BASE_URL=https://api.youversion.com/v1   # optional, this is the defa
 YOUVERSION_ENGLISH_BIBLE_ID=111
 YOUVERSION_CHINESE_BIBLE_ID=312
 
-# ── YouVersion Parallel Mode (optional) ────────────────────────────────────────
-# Set YOUVERSION_CHECKPOINT_FILE to enable parallel crawl mode.
-# Leave empty (or unset) to use sequential mode (original direct-DB behaviour).
-YOUVERSION_CHECKPOINT_FILE=verses.jsonl  # set a file path to enable parallel mode
+# ── YouVersion Parallel Mode (required) ────────────────────────────────────────
+# cmd/youversion-crawler operates exclusively in parallel mode.
+# YOUVERSION_CHECKPOINT_FILE must be set — the crawler will not start without it.
+YOUVERSION_CHECKPOINT_FILE=ckpoint.jsonl  # path to JSONL checkpoint file (required)
 YOUVERSION_WORKERS=20              # parallel goroutines — match or exceed RPS
 YOUVERSION_RATE_LIMIT_RPS=15.0    # requests/sec, token-bucket (≥15 to finish ~62k verses in 1h)
 YOUVERSION_MAX_RETRIES=3           # max retries on 5xx/network errors (default: 3)
 YOUVERSION_RETRY_BASE_MS=500       # initial backoff in ms, doubles each retry (default: 500)
+
+# ── Bible.com HTML Crawler ─────────────────────────────────────────────────────
+# Used by cmd/biblecom-crawler (Step C-1, JSON output) and
+# cmd/biblecom-importer (Step C-2, JSON → DB import).
+BIBLECOM_ZH_BASE_URL=https://www.bible.com/bible/414
+BIBLECOM_EN_BASE_URL=https://www.bible.com/bible/111
+BIBLECOM_ZH_VERSION_SUFFIX=CUNP-%E4%B8%8A%E5%B8%9D
+BIBLECOM_EN_VERSION_SUFFIX=NIV
+BIBLECOM_WORKERS=5
+BIBLECOM_RATE_LIMIT_RPS=2.0
+BIBLECOM_TIMEOUT_SEC=30
+BIBLECOM_OUTPUT_ZH=youversion-bible_books_zh.json
+BIBLECOM_OUTPUT_EN=youversion-bible_books_en.json
+# Optional: comma-separated book sort numbers (1–66); leave unset to crawl all 66 books.
+# Example: BIBLECOM_FILTER_SORTS=65   ← re-crawls only Jude without touching the other 65 books
+#BIBLECOM_FILTER_SORTS=
 ```
 
 ### Step 4: Build Spec Files (first time, or to refresh)
@@ -326,7 +350,7 @@ Done. Written:
 
 ### Step 5: Run the Crawler
 
-Choose **one** of the two crawler approaches. They are **independent** — run either or both, in any order, but never simultaneously (both write to the same database tables).
+Choose **one** of the three crawler approaches. They are **independent** — run either or all, in any order, but never simultaneously (all write to the same database tables).
 
 ---
 
@@ -363,7 +387,9 @@ Bible Crawler finished successfully.
 
 #### Option B — YouVersion API Crawler ✨
 
-**Prerequisites**: `YOUVERSION_API_KEY` and all `YOUVERSION_*` parameters set in `.env`. No spec files needed — all structure is derived from the API.
+**Prerequisites**: `YOUVERSION_API_KEY` and `YOUVERSION_CHECKPOINT_FILE` set in `.env`. No spec files needed — all structure is derived from the API.
+
+> ⚠️ `YOUVERSION_CHECKPOINT_FILE` is **required** — the crawler will not start without it. The crawler operates exclusively in parallel mode.
 
 **Execution order** (two required steps, always in this order):
 
@@ -430,7 +456,106 @@ Import complete: total=62197 written=62197 skipped=0
 
 ---
 
-> **Bible version note**: Option B defaults to NIV 2011 (ID 111) for English and CSB 中文標準譯本 (ID 312, Chinese Standard Bible, traditional Chinese) for Chinese — both freely accessible with a YouVersion Platform app key. To use a different translation, set `YOUVERSION_CHINESE_BIBLE_ID=<id>` in `.env`.
+> **Bible version note**: Option B defaults to CSB 中文標準譯本 (ID 312, Chinese Standard Bible, traditional Chinese) for Chinese and NIV 2011 (ID 111) for English — both freely accessible with a YouVersion Platform app key. To use a different Chinese translation (e.g. 新標點和合本 ID 46 after obtaining a publisher license), set `YOUVERSION_CHINESE_BIBLE_ID=<id>` in `.env`.
+
+---
+
+#### Option C — Bible.com HTML Crawler 🆕
+
+**Prerequisites**: `BIBLECOM_*` environment variables set in `.env` (defaults are provided). The spec JSON files (`bible_books_zh.json` / `bible_books_en.json`) must exist — run Step 4 first if they do not.
+
+**Translations**: CUNP-上帝 (Chinese, version ID 414) + NIV (English, version ID 111).
+
+**Execution order** (two required steps, always in this order):
+
+```
+Step C-1 (biblecom-crawler) ──→ Step C-2 (biblecom-importer)
+```
+
+> ⚠️ Do NOT delete the JSON output files between steps C-1 and C-2. The importer reads the files written by the crawler.
+
+---
+
+##### C-1. Crawl → JSON files
+
+Scrapes all 1,189 chapters × 2 languages from bible.com and writes two JSON files — one per language. **No database writes happen in this step.**
+
+```bash
+go run cmd/biblecom-crawler/main.go
+```
+
+Expected output:
+```text
+[biblecom-crawler] Loading Bible spec...
+[biblecom-crawler] Starting crawl (workers=5 rps=2.0)...
+[biblecom-crawler] Writing output files…
+[biblecom-crawler] Done — ZH: 31102 verses in 66 books | EN: 31102 verses in 66 books
+```
+
+The output files are controlled by `BIBLECOM_OUTPUT_ZH` and `BIBLECOM_OUTPUT_EN` in `.env` (defaults: `youversion-bible_books_zh.json` and `youversion-bible_books_en.json`).
+
+> **Merged verses**: When bible.com displays two or more verse numbers with a single shared text (e.g. 2 Samuel 3:9–10), the parser assigns the full content to the lowest-numbered verse. All secondary verse numbers receive the sentinel text `"併於上節。"` (merged with the verse above) and are annotated with `note: "merged"` in the JSON output.
+
+> **Cross-referenced bracket verses** (bracket-labeled): In NIV and similar modern translations, textually-disputed verses (e.g. Matthew 17:21, Mark 9:44, 9:46, John 5:4) are rendered on bible.com with a bracketed verse number `[21]` and a footnote-only element. The footnote typically says *"Some manuscripts include here words similar to Mark 9:29."* — meaning the verse should carry the content of another verse in the same translation.
+>
+> The parser handles this in two stages:
+> 1. **Detection**: `[N]`-labeled verses containing a `__note` element (no prose) are flagged as bracket verses. If the note contains a `<span class="ref" data-usfm="MRK.9.29">` element, the USFM key is extracted and stored as `cross_ref` in the JSON.
+> 2. **Resolution** (`resolveRefs`): After all 66 books are crawled in memory, the scraper performs a single pass over every bracket verse. Verses with a `cross_ref` field have their `Content` filled in from the referenced verse (e.g. Matthew 17:21 gets the text of Mark 9:29). The `note` field is set to `"ref:MRK.9.29"` and `cross_ref` is retained for audit purposes.
+>
+> If no `span.ref[data-usfm]` is found in the footnote (fallback), the footnote body text is used as the verse content directly, and `note` is set to `"omitted"`.
+>
+> Known NIV examples: Matthew 17:21, 18:11, 23:14; Mark 7:16, 9:44, 9:46, 11:26, 15:28; Luke 17:36, 23:17; John 5:4; Acts 8:37, 15:34, 24:7, 28:29; Romans 16:24.
+
+> **sub_title support**: Unlike the YouVersion API, bible.com HTML pages include pericope section headings. These are captured in the `sub_title` field of each verse and written to `bibles.bible_section_contents.sub_title` during import.
+
+> **Graceful shutdown**: Press `Ctrl+C` at any time. Workers finish their current HTTP request, and partial results are written to the output JSON files.
+
+> **Targeted single-book re-crawl** (`BIBLECOM_FILTER_SORTS`): Set this env var to a
+> comma-separated list of book sort numbers (1–66) to crawl only those books — useful
+> after a USFM-code correction or a network interruption affecting a single book, without
+> re-fetching all 1,189 chapters:
+>
+> ```bash
+> # Re-crawl only Jude (sort=65):
+> BIBLECOM_FILTER_SORTS=65 go run cmd/biblecom-crawler/main.go
+> ```
+>
+> The scraper logs `[biblecom] Book filter active — crawling only sorts: [65]` when the
+> filter is active. The output JSON contains only the filtered books. Run
+> `cmd/biblecom-importer` against it as usual — the importer is fully idempotent and only
+> updates rows for books present in the JSON file.
+
+---
+
+##### C-2. Import JSON → database
+
+Run after C-1 completes. Reads both JSON files and upserts every book, chapter, and verse into PostgreSQL using the same idempotent `SELECT → INSERT → SELECT` pattern as all other crawlers.
+
+```bash
+go run cmd/biblecom-importer/main.go
+```
+
+Expected output:
+```text
+[biblecom-importer] importing Chinese file: youversion-bible_books_zh.json
+[biblecom-importer] Chinese import complete: books=66 chapters=1189 verses=31102 skipped=0
+[biblecom-importer] importing English file: youversion-bible_books_en.json
+[biblecom-importer] English import complete: books=66 chapters=1189 verses=31102 skipped=0
+```
+
+The importer reads `BIBLECOM_OUTPUT_ZH` and `BIBLECOM_OUTPUT_EN` from `.env`. It is fully idempotent — safe to re-run multiple times without creating duplicates.
+
+> **UUID cache**: Structural UUIDs (books, chapters, sections) resolved during the Chinese import are reused for the English import, eliminating ~32,000 redundant SELECT round-trips for already-created rows.
+
+---
+
+#### Utility: YouVersion API Explorer
+
+`cmd/youversion-fetcher` is a developer tool that calls every YouVersion Platform API endpoint and writes the combined responses to `youversion-bible-api-result.json`. Useful for documenting the API response shape and as a local cache for development.
+
+```bash
+YOUVERSION_API_KEY=<your-key> go run cmd/youversion-fetcher/main.go
+```
 
 ### Step 6: Validate (optional)
 
@@ -490,6 +615,18 @@ go run cmd/youversion-crawler/main.go
 go run cmd/youversion-importer/main.go
 ```
 
+**Option C (Bible.com HTML Crawler)** — two required steps in order:
+```
+Step C-1 (biblecom-crawler) ──→ Step C-2 (biblecom-importer)
+```
+```bash
+# Step C-1: Scrape HTML → JSON files
+go run cmd/biblecom-crawler/main.go
+
+# Step C-2: Import JSON → database (run after Step C-1 finishes)
+go run cmd/biblecom-importer/main.go
+```
+
 ### Step D — Restore (after re-crawl)
 
 ```bash
@@ -527,28 +664,40 @@ Run `validation.sql` (at the project root) against your PostgreSQL database. The
 ```text
 bible-crawler/
 ├── cmd/
+│   ├── biblecom-crawler/
+│   │   └── main.go               # bible.com HTML crawler (CUNP-上帝 + NIV) → JSON files (Step C-1)
+│   ├── biblecom-importer/
+│   │   └── main.go               # Reads JSON files → upserts all content to PostgreSQL (Step C-2)
 │   ├── crawler/
-│   │   └── main.go               # HTML crawl entry point (Stages 1 + 2)
+│   │   └── main.go               # HTML crawl entry point (Stages 1 + 2) → PostgreSQL
 │   ├── migrate/
 │   │   └── main.go               # Cross-schema UUID backup/restore (--phase=backup|restore)
 │   ├── spec-builder/
 │   │   └── main.go               # Stage 0: discovers verse counts, writes JSON spec files
 │   ├── youversion-crawler/
-│   │   └── main.go               # YouVersion API crawl: Phase 1 (DB setup) + Phase 2 (verse fetch)
+│   │   └── main.go               # YouVersion API crawl: Phase 1 (DB setup) + Phase 2 (JSONL)
+│   ├── youversion-fetcher/
+│   │   └── main.go               # Dev tool: explores YouVersion API → youversion-bible-api-result.json
 │   └── youversion-importer/
 │       └── main.go               # Reads JSONL checkpoint → batch-writes verses to PostgreSQL
 ├── internal/
+│   ├── biblecom/                 # bible.com HTML crawler: scraper, parser, book catalogue, types
+│   │   ├── books.go              # Canonical 66-book catalogue (USFM codes + localised names)
+│   │   ├── parser.go             # HTML parser (extracts verses + section headings from bible.com)
+│   │   ├── parser_test.go        # Unit tests
+│   │   ├── scraper.go            # BibleComScraper: parallel HTTP crawl with rate limiting
+│   │   └── types.go              # OutputFile, BookOutput, ChapterOutput, VerseOutput, workItem
 │   ├── config/                   # Environment variable loader (all .env fields)
 │   │   └── config_test.go        # Unit tests — 100 % coverage
 │   ├── database/                 # PostgreSQL connection setup
 │   │   └── database_test.go      # Integration tests (build tag: integration)
 │   ├── migration/                # Backup/restore logic for cross-schema bible refs
 │   │   └── migration_test.go     # Unit tests with go-sqlmock — 100 % coverage
-│   ├── model/                    # Go structs for DB tables
+│   ├── model/                    # Go structs for DB tables (6 structs)
 │   ├── repository/               # Idempotent data-access layer (all SQL)
 │   │   ├── repository_test.go             # Unit tests with go-sqlmock — 100 % coverage
 │   │   └── repository_integration_test.go # Integration tests (build tag: integration)
-│   ├── scraper/                  # Colly-based HTML crawl orchestration
+│   ├── scraper/                  # Colly-based HTML crawl orchestration (springbible.fhl.net)
 │   │   ├── scraper_test.go             # Unit tests — 96 % coverage
 │   │   └── scraper_integration_test.go  # Integration tests (build tag: integration)
 │   ├── spec/                     # JSON spec loader (BibleSpec, BookSpec)
@@ -559,11 +708,12 @@ bible-crawler/
 │   │   └── encoding_test.go      # Unit tests — 83 % coverage
 │   └── youversion/               # YouVersion Platform API client + scraper
 │       ├── checkpoint.go         # JSONL checkpoint: VerseRecord, Append, LoadCompleted
-│       ├── client.go             # HTTP client (GetBooks, GetPassage, …)
+│       ├── client.go             # HTTP client (GetBooks, GetPassage, GetBibles, GetVOTD, …)
 │       ├── client_test.go        # Unit tests — 100 % coverage
-│       ├── scraper.go            # Orchestrator: setupBooks, crawlVerses, crawlVersesParallel
+│       ├── scraper.go            # Orchestrator: setupBooks, crawlVersesParallel
 │       ├── scraper_test.go       # Unit tests — 100 % coverage
-│       └── types.go              # API response types (BooksResponse, PassageData, …)
+│       ├── titles.go             # FormatChapterTitle / FormatVerseTitle (localised templates)
+│       └── types.go              # API response types (BooksResponse, PassageData, VOTDEntry, …)
 ├── bible_books_zh.json           # Per-chapter verse counts for 和合本 (auto-generated)
 ├── bible_books_en.json           # Per-chapter verse counts for BBE    (auto-generated)
 ├── validation.sql                # PostgreSQL validation + bilingual chapter viewer queries
@@ -590,7 +740,27 @@ A: Section 5 of `validation.sql` lists versification-difference chapters — the
 A: The crawler decodes Big5 pages before parsing. Do not modify `internal/utils/encoding.go`.
 
 **Q: YouVersion crawler logs many "status 404" errors.**  
-A: 404 responses are **expected and normal** for certain verses that modern translations deliberately omit. For example, NIV omits MAT.17.21, MAT.18.11, MRK.7.16, etc. These are silently skipped in both sequential and parallel modes. Only 429 or 5xx responses trigger retries.
+A: 404 responses are **expected and normal** for certain verses that modern translations deliberately omit. For example, NIV omits MAT.17.21, MAT.18.11, MRK.7.16, etc. These are silently skipped. Only 429 or 5xx responses trigger retries.
+
+**Q: YouVersion crawler fails with "YOUVERSION_CHECKPOINT_FILE must be set".**  
+A: The YouVersion crawler operates **exclusively in parallel mode** and requires `YOUVERSION_CHECKPOINT_FILE` to be set in `.env`. Set it to any file path (e.g. `YOUVERSION_CHECKPOINT_FILE=ckpoint.jsonl`) before running.
+
+**Q: bible.com crawler fails with a configuration error.**  
+A: All `BIBLECOM_*` environment variables have sensible defaults in `.env.example`. The crawler validates URLs (must be `https://www.bible.com/…`) and numeric ranges (workers 1–50, RPS 0.1–20, timeout 5–120 s) at startup.
+
+**Q: bible.com crawler output is missing a book — e.g. Jude never appears in the JSON.**  
+A: A silently-missing book almost always means its USFM code in `internal/biblecom/books.go` does not match what bible.com uses in its page URLs. Historically, Jude (sort=65) was catalogued as `"JDE"` instead of the correct `"JUD"` — every request returned HTTP 404, and the book was silently dropped. **This has been fixed.** The scraper now logs a `WARN` line for every in-scope book that yields no chapters, including the USFM code, making future mismatches immediately visible. If you have JSON files produced before this fix, simply re-run `cmd/biblecom-crawler` to regenerate them.
+
+**Q: How do I re-crawl only one book without re-fetching all 66?**  
+A: Use the `BIBLECOM_FILTER_SORTS` env var set to the book's canonical sort number (1–66):
+
+```bash
+# Re-crawl only Jude (sort=65) — leaves the other 65 books untouched in the DB:
+BIBLECOM_FILTER_SORTS=65 go run cmd/biblecom-crawler/main.go
+go run cmd/biblecom-importer/main.go
+```
+
+The scraper enqueues chapters only for books in the filter list and logs `[biblecom] Book filter active — crawling only sorts: [65]` to confirm. The output JSON contains only the filtered books; the importer is fully idempotent and only updates rows present in the JSON.
 
 **Q: `bible_books_zh.json` and `bible_books_en.json` have identical verse counts.**  
 A: Re-run `cmd/spec-builder/main.go`. The spec files must be generated from the live website to capture per-language versification differences.

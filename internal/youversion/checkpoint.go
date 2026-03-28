@@ -240,5 +240,12 @@ func (c *Checkpoint) Close() error {
 	if err := c.file.Sync(); err != nil {
 		return fmt.Errorf("sync checkpoint: %w", err)
 	}
-	return fmt.Errorf("close checkpoint %q: %w", c.path, c.file.Close())
+	// A bare return fmt.Errorf("...: %w", err) always produces a non-nil error
+	// value even when c.file.Close() succeeds (because fmt.Errorf wraps nil into
+	// a non-nil *fmt.wrapError). That would make every successful Close() appear
+	// to fail to callers that check `if err := cp.Close(); err != nil` (CWE-252).
+	if err := c.file.Close(); err != nil {
+		return fmt.Errorf("close checkpoint %q: %w", c.path, err)
+	}
+	return nil
 }

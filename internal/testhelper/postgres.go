@@ -4,6 +4,7 @@ package testhelper
 
 import (
 	"context"
+	"os"
 	"testing"
 
 	"github.com/jmoiron/sqlx"
@@ -59,8 +60,22 @@ CREATE TABLE IF NOT EXISTS bibles.bible_section_contents (
 
 // StartPostgres spins up a PostgreSQL container, applies the Bible schema, and
 // returns a ready *sqlx.DB plus a cleanup function to call in t.Cleanup.
+// It skips the test gracefully if Docker is not available.
 func StartPostgres(t *testing.T) (db *sqlx.DB, cleanup func()) {
 	t.Helper()
+
+	// On macOS with Docker Desktop, DOCKER_HOST is often unset while the socket
+	// is reachable at the standard path. Set it so testcontainers-go can discover
+	// the daemon without panicking.
+	if os.Getenv("DOCKER_HOST") == "" {
+		if _, err := os.Stat("/var/run/docker.sock"); err == nil {
+			os.Setenv("DOCKER_HOST", "unix:///var/run/docker.sock") //nolint:errcheck
+		}
+	}
+
+	// Skip gracefully when Docker is unavailable instead of panicking.
+	testcontainers.SkipIfProviderIsNotHealthy(t)
+
 	ctx := context.Background()
 
 	ctr, err := postgres.Run(ctx,

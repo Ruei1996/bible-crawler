@@ -599,9 +599,9 @@ func TestGetOrCreateSection_Step3DBError(t *testing.T) {
 // ──────────────────────────────────────────────────────────────
 
 const (
-	sqlSelectSectionContent = `SELECT title, content FROM bibles.bible_section_contents WHERE bible_section_id = $1 AND language = $2`
-	sqlUpdateSectionContent = `UPDATE bibles.bible_section_contents SET title = $3, content = $4 WHERE bible_section_id = $1 AND language = $2`
-	sqlInsertSectionContent = `INSERT INTO bibles.bible_section_contents (bible_section_id, language, title, content) VALUES ($1, $2, $3, $4)`
+	sqlSelectSectionContent = `SELECT title, content, sub_title FROM bibles.bible_section_contents WHERE bible_section_id = $1 AND language = $2`
+	sqlUpdateSectionContent = `UPDATE bibles.bible_section_contents SET title = $3, content = $4, sub_title = $5 WHERE bible_section_id = $1 AND language = $2`
+	sqlInsertSectionContent = `INSERT INTO bibles.bible_section_contents (bible_section_id, language, title, content, sub_title) VALUES ($1, $2, $3, $4, $5)`
 )
 
 func TestUpsertSectionContent_NilUUID(t *testing.T) {
@@ -648,8 +648,8 @@ func TestUpsertSectionContent_SameTitleAndContent(t *testing.T) {
 	repo := repository.NewBibleRepository(sqlxDB)
 
 	mock.ExpectQuery(qre(sqlSelectSectionContent)).
-		WillReturnRows(sqlmock.NewRows([]string{"title", "content"}).
-			AddRow("verse 1", "In the beginning"))
+		WillReturnRows(sqlmock.NewRows([]string{"title", "content", "sub_title"}).
+			AddRow("verse 1", "In the beginning", ""))
 
 	err := repo.UpsertSectionContent(uuid.New(), "english", "verse 1", "In the beginning")
 	require.NoError(t, err)
@@ -661,8 +661,8 @@ func TestUpsertSectionContent_ContentChanged_Update(t *testing.T) {
 	repo := repository.NewBibleRepository(sqlxDB)
 
 	mock.ExpectQuery(qre(sqlSelectSectionContent)).
-		WillReturnRows(sqlmock.NewRows([]string{"title", "content"}).
-			AddRow("verse 1", "old content"))
+		WillReturnRows(sqlmock.NewRows([]string{"title", "content", "sub_title"}).
+			AddRow("verse 1", "old content", ""))
 	mock.ExpectExec(qre(sqlUpdateSectionContent)).
 		WillReturnResult(sqlmock.NewResult(1, 1))
 
@@ -676,8 +676,8 @@ func TestUpsertSectionContent_UpdateError(t *testing.T) {
 	repo := repository.NewBibleRepository(sqlxDB)
 
 	mock.ExpectQuery(qre(sqlSelectSectionContent)).
-		WillReturnRows(sqlmock.NewRows([]string{"title", "content"}).
-			AddRow("verse 1", "old content"))
+		WillReturnRows(sqlmock.NewRows([]string{"title", "content", "sub_title"}).
+			AddRow("verse 1", "old content", ""))
 	mock.ExpectExec(qre(sqlUpdateSectionContent)).WillReturnError(errDB)
 
 	err := repo.UpsertSectionContent(uuid.New(), "english", "verse 1", "new content")
@@ -690,7 +690,7 @@ func TestUpsertSectionContent_Insert(t *testing.T) {
 	repo := repository.NewBibleRepository(sqlxDB)
 
 	mock.ExpectQuery(qre(sqlSelectSectionContent)).
-		WillReturnRows(sqlmock.NewRows([]string{"title", "content"}))
+		WillReturnRows(sqlmock.NewRows([]string{"title", "content", "sub_title"}))
 	mock.ExpectExec(qre(sqlInsertSectionContent)).
 		WillReturnResult(sqlmock.NewResult(1, 1))
 
@@ -704,7 +704,7 @@ func TestUpsertSectionContent_InsertError(t *testing.T) {
 	repo := repository.NewBibleRepository(sqlxDB)
 
 	mock.ExpectQuery(qre(sqlSelectSectionContent)).
-		WillReturnRows(sqlmock.NewRows([]string{"title", "content"}))
+		WillReturnRows(sqlmock.NewRows([]string{"title", "content", "sub_title"}))
 	mock.ExpectExec(qre(sqlInsertSectionContent)).WillReturnError(errDB)
 
 	err := repo.UpsertSectionContent(uuid.New(), "chinese", "第1節", "太初，神創造天地")
@@ -736,8 +736,8 @@ func TestUpsertSectionContent_TitleChanged_Update(t *testing.T) {
 	repo := repository.NewBibleRepository(sqlxDB)
 
 	mock.ExpectQuery(qre(sqlSelectSectionContent)).
-		WillReturnRows(sqlmock.NewRows([]string{"title", "content"}).
-			AddRow("old title", "same content"))
+		WillReturnRows(sqlmock.NewRows([]string{"title", "content", "sub_title"}).
+			AddRow("old title", "same content", ""))
 	mock.ExpectExec(qre(sqlUpdateSectionContent)).
 		WillReturnResult(sqlmock.NewResult(1, 1))
 

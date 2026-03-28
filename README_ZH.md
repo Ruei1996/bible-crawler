@@ -1,13 +1,16 @@
 # Bible Crawler（聖經爬蟲系統）
 
-這是一個 Go 語言聖經爬蟲，將聖經內容存入結構嚴謹的 PostgreSQL 資料庫。支援**兩種資料來源**，寫入完全相同的資料表 Schema，可互換使用：
+這是一個 Go 語言聖經爬蟲，將聖經內容存入結構嚴謹的 PostgreSQL 資料庫。支援**三種資料來源**，寫入完全相同的資料表 Schema，可互換使用：
 
-- **HTML 爬蟲**（`cmd/crawler`）：從 `springbible.fhl.net` 抓取和合本與 BBE。
-- **YouVersion API 爬蟲**（`cmd/youversion-crawler` + `cmd/youversion-importer`）：透過 [YouVersion Platform REST API](https://developers.youversion.com/api/bibles) 取得聖經內容。無需 Spec 規格檔，所有結構直接從 API 取得。使用**平行模式**（N 個 worker + 流量限制 + 指數退避重試 + JSONL 斷點續傳），預設使用 NIV 2011（ID 111）英文版及 CSB 中文標準譯本（ID 312）繁體中文版。
+| 資料來源 | 指令 | 翻譯版本 | 輸出 |
+|----------|------|----------|------|
+| `springbible.fhl.net` HTML | `cmd/crawler` | 和合本 CUV + BBE | 直接 → PostgreSQL |
+| [YouVersion Platform API](https://api.youversion.com/v1) | `cmd/youversion-crawler` + `cmd/youversion-importer` | CSB 中文標準譯本 (ID 312) + NIV 2011 (ID 111) | JSONL 斷點檔 → PostgreSQL |
+| `bible.com` HTML | `cmd/biblecom-crawler` + `cmd/biblecom-importer` | CUNP-上帝 (ID 414) + NIV (ID 111) | JSON 檔案 → PostgreSQL |
 
 ## 🌟 功能特色
 
-- **雙資料來源支援**：HTML 爬蟲與 YouVersion API 爬蟲輸出至相同 Schema，資料格式完全一致。
+- **三種資料來源支援**：HTML 爬蟲、YouVersion API 爬蟲與 bible.com HTML 爬蟲，輸出至相同 Schema，資料格式完全一致。
 - **Spec 驅動爬取**（HTML 路徑）：各章節的實際節數從 `bible_books_zh.json`（和合本）與 `bible_books_en.json`（BBE）讀取，程式碼零硬寫數字，完全由 JSON 規格控制。
 - **三階段工作流程**（HTML 路徑）:
   - **Stage 0 — Spec Builder**：爬取每個章節（兩語言），發現實際節數，寫入兩份 JSON 規格檔。首次建置或需更新規格時執行。
@@ -15,8 +18,9 @@
   - **Stage 2 — 章節與經文爬取**：非同步併發爬取 1,189 個章節 × 2 語言，依各語言的規格節數上限存入資料庫。
 - **版本節數差異處理（Versification-Aware）**：和合本與 BBE 在部分書卷（例如利未記、撒迦利亞書）的章節邊界不同。Spec 檔案記錄各語言的正確節數，爬蟲自動依上限存入，不會寫入超出範圍的節。
 - **冪等寫入（Idempotent）**：所有 DB 寫入使用 `SELECT → INSERT → SELECT` 三步驟模式（對併發 goroutine 安全無 race condition）。重複執行爬蟲不會產生重複資料。
-- **編碼處理**：自動將中文頁面的 **Big5** 編碼轉換為 UTF-8 後再解析。
+- **編碼處理**：自動將 springbible.fhl.net 中文頁面的 **Big5** 編碼轉換為 UTF-8 後再解析。
 - **完全可配置**：來源 URL、並行數、延遲與 HTTP 逾時皆透過 `.env` 設定，網站更新時無需重新編譯。
+- **跨 Schema 遷移**（`cmd/migrate`）：TRUNCATE `bibles` schema 重新爬取前，備份並還原其他微服務 schema（`activities`、`devotions`）中無宣告 FK 的 UUID 引用。
 
 ## 🧪 測試
 
@@ -224,7 +228,7 @@ go test -json ./... | jq '.Output' -r
 
 ## 🛠 前置需求
 
-- **Go** 1.21 或更高版本
+- **Go** 1.25 或更高版本
 - **PostgreSQL** 13 或更高版本
 - **Git**
 
@@ -279,7 +283,7 @@ SOURCE_EN_URL=https://springbible.fhl.net/Bible2/cgic201/read201.cgi?na=0&chap=%
 CRAWLER_PARALLELISM=5
 CRAWLER_DELAY_MS=200
 CRAWLER_RANDOM_DELAY_MS=100
-HTTP_TIMEOUT_SEC=10
+HTTP_TIMEOUT_SEC=30
 
 # ── YouVersion Platform API（youversion-crawler 專用）────────────────────────
 # 在 https://platform.youversion.com 申請 App Key
@@ -290,14 +294,30 @@ YOUVERSION_BASE_URL=https://api.youversion.com/v1   # 選填，此為預設值
 YOUVERSION_ENGLISH_BIBLE_ID=111
 YOUVERSION_CHINESE_BIBLE_ID=312
 
-# ── YouVersion 平行模式（選填）───────────────────────────────────────────────
-# 設定 YOUVERSION_CHECKPOINT_FILE 可啟用平行爬取模式。
-# 留空（或不設定）則使用循序模式（原始行為，直接寫入 DB）。
-YOUVERSION_CHECKPOINT_FILE=verses.jsonl  # 設定檔案路徑以啟用平行模式
+# ── YouVersion 平行模式（必填）────────────────────────────────────────────────
+# cmd/youversion-crawler 只支援平行模式，YOUVERSION_CHECKPOINT_FILE 為必填。
+# 未設定時爬蟲將拒絕啟動。
+YOUVERSION_CHECKPOINT_FILE=ckpoint.jsonl  # JSONL 斷點檔案路徑（必填）
 YOUVERSION_WORKERS=20              # 平行 goroutine 數量（需 ≥ RPS）
 YOUVERSION_RATE_LIMIT_RPS=15.0    # 每秒最大請求數（≥15 可在 1 小時內完成約 6.2 萬節）
 YOUVERSION_MAX_RETRIES=3           # 5xx/網路錯誤最大重試次數（預設：3）
 YOUVERSION_RETRY_BASE_MS=500       # 初始退避間隔毫秒，每次加倍（預設：500）
+
+# ── Bible.com HTML 爬蟲（CUNP-上帝 + NIV）───────────────────────────────────
+# 用於 cmd/biblecom-crawler（步驟 C-1，輸出 JSON 檔案）
+# 及 cmd/biblecom-importer（步驟 C-2，讀取 JSON 匯入 DB）。
+BIBLECOM_ZH_BASE_URL=https://www.bible.com/bible/414
+BIBLECOM_EN_BASE_URL=https://www.bible.com/bible/111
+BIBLECOM_ZH_VERSION_SUFFIX=CUNP-%E4%B8%8A%E5%B8%9D
+BIBLECOM_EN_VERSION_SUFFIX=NIV
+BIBLECOM_WORKERS=5
+BIBLECOM_RATE_LIMIT_RPS=2.0
+BIBLECOM_TIMEOUT_SEC=30
+BIBLECOM_OUTPUT_ZH=youversion-bible_books_zh.json
+BIBLECOM_OUTPUT_EN=youversion-bible_books_en.json
+# Optional: comma-separated book sort numbers (1–66); leave unset to crawl all 66 books.
+# Example: BIBLECOM_FILTER_SORTS=65   ← re-crawls only Jude without touching the other 65 books
+#BIBLECOM_FILTER_SORTS=
 ```
 
 ### 步驟 4：建置 Spec 規格檔（首次或需更新時執行）
@@ -326,7 +346,7 @@ Done. Written:
 
 ### 步驟 5：執行爬蟲
 
-請選擇**其中一種**爬蟲方式。兩者彼此**獨立**，可任意順序執行，但不可同時執行（兩者寫入相同資料表）。
+請選擇**其中一種**（或多種）爬蟲方式。三者彼此**獨立**，可任意順序執行，但不可同時執行（全部寫入相同資料表）。
 
 ---
 
@@ -363,7 +383,9 @@ Bible Crawler finished successfully.
 
 #### 選項 B — YouVersion API 爬蟲 ✨
 
-**前置條件**：`.env` 已設定 `YOUVERSION_API_KEY` 及所有 `YOUVERSION_*` 參數。無需規格檔，所有結構直接從 API 取得。
+**前置條件**：`.env` 已設定 `YOUVERSION_API_KEY` 與 `YOUVERSION_CHECKPOINT_FILE`。無需規格檔，所有結構直接從 API 取得。
+
+> ⚠️ `YOUVERSION_CHECKPOINT_FILE` 為**必填**，未設定時爬蟲將拒絕啟動。爬蟲**只支援平行模式**。
 
 **執行順序**（兩個必要步驟，須依序執行）：
 
@@ -426,13 +448,114 @@ Imported 1000 verses...
 Import complete: total=62197 written=62197 skipped=0
 ```
 
-> 匯入程式會自動從 `.env` 讀取 `YOUVERSION_CHECKPOINT_FILE`，無需額外指定。完全冪等，可安全重複執行；內部使用與其他 repository 相同的 `SELECT→INSERT→SELECT` 模式。
+> 匯入程式會自動從 `.env` 讀取 `YOUVERSION_CHECKPOINT_FILE`，無需額外指定。完全冪等，可安全重複執行。
 
 ---
 
-> **聖經版本說明**：選項 B 預設使用 NIV 2011（ID 111）英文版與 CSB 中文標準譯本（ID 312，繁體中文），兩者皆可免費透過 YouVersion Platform App Key 存取。若需使用其他中文譯本，在 `.env` 設定 `YOUVERSION_CHINESE_BIBLE_ID=<id>` 即可。
+> **聖經版本說明**：選項 B 預設使用 CSB 中文標準譯本（ID 312，繁體中文）與 NIV 2011（ID 111），兩者皆可免費透過 YouVersion Platform App Key 存取。若需使用其他中文譯本（例如取得授權後的新標點和合本 ID 46），在 `.env` 設定 `YOUVERSION_CHINESE_BIBLE_ID=<id>` 即可。
+
+---
+
+#### 選項 C — Bible.com HTML 爬蟲 🆕
+
+**前置條件**：`.env` 已設定 `BIBLECOM_*` 環境變數（預設值已提供）。規格 JSON 檔案（`bible_books_zh.json` / `bible_books_en.json`）必須存在 — 若尚未建立，請先執行步驟 4。
+
+**翻譯版本**：CUNP-上帝（中文，版本 ID 414）+ NIV（英文，版本 ID 111）。
+
+**執行順序**（必須依序完成兩個步驟）：
+
+```
+步驟 C-1 (biblecom-crawler) ──→ 步驟 C-2 (biblecom-importer)
+```
+
+> ⚠️ 在步驟 C-1 與 C-2 之間，**不要刪除** JSON 輸出檔案。匯入程式需讀取爬蟲產生的 JSON 檔案。
+
+---
+
+##### C-1. 爬取 → JSON 檔案
+
+爬取 bible.com 網站全部 1,189 章 × 2 種語言，並寫出兩份 JSON 檔案（各一語言）。**本步驟不會寫入資料庫。**
+
+```bash
+go run cmd/biblecom-crawler/main.go
+```
+
+預期輸出：
+```text
+[biblecom-crawler] Loading Bible spec...
+[biblecom-crawler] Starting crawl (workers=5 rps=2.0)...
+[biblecom-crawler] Writing output files…
+[biblecom-crawler] Done — ZH: 31102 verses in 66 books | EN: 31102 verses in 66 books
+```
+
+輸出檔案路徑由 `.env` 中的 `BIBLECOM_OUTPUT_ZH` 與 `BIBLECOM_OUTPUT_EN` 控制（預設：`youversion-bible_books_zh.json` 與 `youversion-bible_books_en.json`）。
+
+> **合併節偵測**：當 bible.com 以同一段經文顯示多個節號（例如撒母耳記下 3:9–10），解析器會將完整內容指定給最小節號，其餘節號則以哨兵文字 `"併於上節。"` 填充，並在 JSON 中以 `note: "merged"` 標記。
+
+> **交叉參照的方括號節（Cross-referenced bracket verses）**：某些譯本（如 NIV）會以方括號包住節號（例如 `[21]`），表示該節僅見於部分抄本，非譯者採用的最早手稿。bible.com 對這類節僅渲染 `__note` 腳注元素，腳注通常說明「某些抄本於此處包含類似馬可福音 9:29 的文字」——意即該節內容應填入另一節的原文。
+>
+> 解析器以兩個階段處理此狀況：
+> 1. **偵測**：`[N]` 標記的節若僅包含 `__note` 元素（無正文），即被標記為方括號節。若腳注中含有 `<span class="ref" data-usfm="MRK.9.29">` 元素，則提取 USFM 鍵值並存入 JSON 的 `cross_ref` 欄位。
+> 2. **解析** (`resolveRefs`)：66 本書全部爬取完成後，爬蟲對所有方括號節進行一次記憶體內掃描。有 `cross_ref` 的節會從被參照的節取得實際內容（例如馬太福音 17:21 會取得馬可福音 9:29 的原文）。`note` 欄位設為 `"ref:MRK.9.29"`，`cross_ref` 保留供稽核追蹤。
+>
+> 若腳注中找不到 `span.ref[data-usfm]`（退回機制），則直接以腳注本文作為節的內容，`note` 設為 `"omitted"`。
+>
+> NIV 已知的 16 個案例：馬太福音 17:21、18:11、23:14；馬可福音 7:16、9:44、9:46、11:26、15:28；路加福音 17:36、23:17；約翰福音 5:4；使徒行傳 8:37、15:34、24:7、28:29；羅馬書 16:24。
+
+> **sub_title 支援**：與 YouVersion API 不同，bible.com HTML 頁面包含段落標題（pericope headings）。這些標題會捕捉至每個 `VerseOutput` 的 `sub_title` 欄位，並在匯入時寫入 `bibles.bible_section_contents.sub_title`。
+
+> **優雅停止**：執行中按 `Ctrl+C`，Worker 完成當前 HTTP 請求後安全停止，部分結果會寫入輸出 JSON 檔案。
+
+> **Targeted single-book re-crawl** (`BIBLECOM_FILTER_SORTS`): Set this env var to a
+> comma-separated list of book sort numbers (1–66) to crawl only those books — useful
+> after a USFM-code correction or a network interruption affecting a single book, without
+> re-fetching all 1,189 chapters:
+>
+> ```bash
+> # Re-crawl only Jude (sort=65):
+> BIBLECOM_FILTER_SORTS=65 go run cmd/biblecom-crawler/main.go
+> ```
+>
+> The scraper logs `[biblecom] Book filter active — crawling only sorts: [65]` when the
+> filter is active. The output JSON contains only the filtered books. Run
+> `cmd/biblecom-importer` against it as usual — the importer is fully idempotent and only
+> updates rows for books present in the JSON file.
+
+---
+
+##### C-2. 匯入 JSON → 資料庫
+
+在 C-1 完成後執行。讀取兩份 JSON 檔案，以與其他爬蟲相同的冪等 `SELECT → INSERT → SELECT` 模式，將所有書卷、章節和節段 upsert 至 PostgreSQL。
+
+```bash
+go run cmd/biblecom-importer/main.go
+```
+
+預期輸出：
+```text
+[biblecom-importer] importing Chinese file: youversion-bible_books_zh.json
+[biblecom-importer] Chinese import complete: books=66 chapters=1189 verses=31102 skipped=0
+[biblecom-importer] importing English file: youversion-bible_books_en.json
+[biblecom-importer] English import complete: books=66 chapters=1189 verses=31102 skipped=0
+```
+
+匯入程式讀取 `.env` 中的 `BIBLECOM_OUTPUT_ZH` 與 `BIBLECOM_OUTPUT_EN`。完全冪等，可安全重複執行多次，不會產生重複資料。
+
+> **UUID 快取**：中文匯入期間解析出的結構性 UUID（書卷、章節、小節）會在英文匯入時共用，減少約 32,000 次冗餘的 SELECT 資料庫查詢。
+
+---
+
+#### 工具程式：YouVersion API 探索器
+
+`cmd/youversion-fetcher` 是開發者工具，呼叫所有 YouVersion Platform API 端點並將結果合併寫入 `youversion-bible-api-result.json`。適合用於記錄 API 回應格式，或作為本地開發快取。
+
+```bash
+YOUVERSION_API_KEY=<your-key> go run cmd/youversion-fetcher/main.go
+```
 
 ### 步驟 6：驗證資料（選擇性）
+
+對資料庫執行專案根目錄的 `validation.sql`。查詢涵蓋三個層級（書、章、節）。第 1–3 節（缺漏偵測）應返回 **0 筆**結果；第 5 節（版本差異稽核）會列出預期的版本差異章節，這是正常現象。
 
 ---
 
@@ -490,6 +613,18 @@ go run cmd/youversion-crawler/main.go
 go run cmd/youversion-importer/main.go
 ```
 
+**選項 C（bible.com HTML 爬蟲）** — 兩個必要步驟，須依序執行：
+```
+步驟 C-1 (biblecom-crawler) ──→ 步驟 C-2 (biblecom-importer)
+```
+```bash
+# 步驟 C-1：爬取 HTML → JSON 檔案
+go run cmd/biblecom-crawler/main.go
+
+# 步驟 C-2：匯入 JSON → 資料庫（步驟 C-1 完成後才執行）
+go run cmd/biblecom-importer/main.go
+```
+
 ### 步驟 D — 還原（爬蟲完成後）
 
 ```bash
@@ -527,28 +662,40 @@ Backup table dropped.
 ```text
 bible-crawler/
 ├── cmd/
+│   ├── biblecom-crawler/
+│   │   └── main.go               # bible.com HTML 爬蟲（CUNP-上帝 + NIV）→ JSON 檔案（步驟 C-1）
+│   ├── biblecom-importer/
+│   │   └── main.go               # 讀取 JSON 檔案 → 批次寫入 PostgreSQL（步驟 C-2）
 │   ├── crawler/
-│   │   └── main.go               # 主爬蟲進入點（Stage 1 + 2）
+│   │   └── main.go               # 主爬蟲進入點（Stage 1 + 2）→ PostgreSQL
 │   ├── migrate/
 │   │   └── main.go               # 跨 schema UUID 備份/還原（--phase=backup|restore）
 │   ├── spec-builder/
 │   │   └── main.go               # Stage 0：發現節數，寫入 JSON 規格檔
 │   ├── youversion-crawler/
-│   │   └── main.go               # YouVersion API 爬蟲：Phase 1（DB 建置）+ Phase 2（經文爬取）
+│   │   └── main.go               # YouVersion API 爬蟲：Phase 1（DB 建置）+ Phase 2（JSONL）
+│   ├── youversion-fetcher/
+│   │   └── main.go               # 開發工具：探索 YouVersion API → youversion-bible-api-result.json
 │   └── youversion-importer/
 │       └── main.go               # 讀取 JSONL 斷點檔案 → 批次寫入 PostgreSQL
 ├── internal/
+│   ├── biblecom/                 # bible.com HTML 爬蟲：爬蟲、解析器、書目清單、型別
+│   │   ├── books.go              # 66 卷書正典目錄（USFM 代碼 + 本地化名稱）
+│   │   ├── parser.go             # HTML 解析器（從 bible.com 擷取經文與段落標題）
+│   │   ├── parser_test.go        # 單元測試
+│   │   ├── scraper.go            # BibleComScraper：平行 HTTP 爬取 + 流量限制
+│   │   └── types.go              # OutputFile、BookOutput、ChapterOutput、VerseOutput、workItem
 │   ├── config/                   # 環境變數載入（所有 .env 欄位）
 │   │   └── config_test.go        # 單元測試 — 100 % 覆蓋率
 │   ├── database/                 # PostgreSQL 連線設定
 │   │   └── database_test.go      # 整合測試（build tag: integration）
 │   ├── migration/                # 跨 schema 聖經引用備份/還原邏輯
 │   │   └── migration_test.go     # 單元測試（go-sqlmock）— 100 % 覆蓋率
-│   ├── model/                    # 對應資料庫的 Go Struct
+│   ├── model/                    # 對應資料庫的 Go Struct（6 個）
 │   ├── repository/               # 冪等資料存取層（所有 SQL）
 │   │   ├── repository_test.go             # 單元測試（go-sqlmock）— 100 % 覆蓋率
 │   │   └── repository_integration_test.go # 整合測試（build tag: integration）
-│   ├── scraper/                  # Colly HTML 爬蟲核心邏輯
+│   ├── scraper/                  # Colly HTML 爬蟲核心邏輯（springbible.fhl.net）
 │   │   ├── scraper_test.go             # 單元測試 — 96 % 覆蓋率
 │   │   └── scraper_integration_test.go  # 整合測試（build tag: integration）
 │   ├── spec/                     # JSON 規格檔載入（BibleSpec, BookSpec）
@@ -559,11 +706,12 @@ bible-crawler/
 │   │   └── encoding_test.go      # 單元測試 — 83 % 覆蓋率
 │   └── youversion/               # YouVersion Platform API 客戶端 + 爬蟲
 │       ├── checkpoint.go         # JSONL 斷點：VerseRecord、Append、LoadCompleted
-│       ├── client.go             # HTTP 客戶端（GetBooks、GetPassage…）
+│       ├── client.go             # HTTP 客戶端（GetBooks、GetPassage、GetBibles、GetVOTD…）
 │       ├── client_test.go        # 單元測試 — 100 % 覆蓋率
-│       ├── scraper.go            # 爬蟲協調器：setupBooks、crawlVerses、crawlVersesParallel
+│       ├── scraper.go            # 爬蟲協調器：setupBooks、crawlVersesParallel
 │       ├── scraper_test.go       # 單元測試 — 100 % 覆蓋率
-│       └── types.go              # API 回應型別（BooksResponse、PassageData…）
+│       ├── titles.go             # FormatChapterTitle / FormatVerseTitle（本地化模板）
+│       └── types.go              # API 回應型別（BooksResponse、PassageData、VOTDEntry…）
 ├── bible_books_zh.json           # 和合本各章節數（由 spec-builder 自動產生）
 ├── bible_books_en.json           # BBE 各章節數（由 spec-builder 自動產生）
 ├── validation.sql                # PostgreSQL 驗證查詢 + 雙語章節內容查詢
@@ -591,6 +739,26 @@ A：爬蟲已內建 Big5 轉 UTF-8 處理。請勿修改 `internal/utils/encodin
 
 **Q：YouVersion 爬蟲記錄大量「status 404」錯誤**  
 A：404 回應為**正常現象**。NIV 等現代譯本刻意省略部分節號（例如 MAT.17.21、MAT.18.11、MRK.7.16 等），平行模式自動靜默跳過這些節。只有 429 或 5xx 回應才會觸發重試。
+
+**Q：YouVersion 爬蟲出現「YOUVERSION_CHECKPOINT_FILE must be set」錯誤**  
+A：YouVersion 爬蟲**只支援平行模式**，`YOUVERSION_CHECKPOINT_FILE` 為必填。請在 `.env` 中設定任意檔案路徑（例如 `YOUVERSION_CHECKPOINT_FILE=ckpoint.jsonl`）後再啟動。
+
+**Q：Bible.com 爬蟲啟動時出現設定錯誤**  
+A：爬蟲啟動時會驗證 URL（必須為 `https://www.bible.com/…`）和數值範圍（workers 1–50、RPS 0.1–20、timeout 5–120 秒）。`.env.example` 已提供所有欄位的合理預設值。
+
+**Q: bible.com crawler output is missing a book — e.g. Jude never appears in the JSON.**  
+A: A silently-missing book almost always means its USFM code in `internal/biblecom/books.go` does not match what bible.com uses in its page URLs. Historically, Jude (sort=65) was catalogued as `"JDE"` instead of the correct `"JUD"` — every request returned HTTP 404, and the book was silently dropped. **This has been fixed.** The scraper now logs a `WARN` line for every in-scope book that yields no chapters, including the USFM code, making future mismatches immediately visible. If you have JSON files produced before this fix, simply re-run `cmd/biblecom-crawler` to regenerate them.
+
+**Q: How do I re-crawl only one book without re-fetching all 66?**  
+A: Use the `BIBLECOM_FILTER_SORTS` env var set to the book's canonical sort number (1–66):
+
+```bash
+# Re-crawl only Jude (sort=65) — leaves the other 65 books untouched in the DB:
+BIBLECOM_FILTER_SORTS=65 go run cmd/biblecom-crawler/main.go
+go run cmd/biblecom-importer/main.go
+```
+
+The scraper logs `[biblecom] Book filter active — crawling only sorts: [65]` to confirm. The output JSON contains only the filtered books; the importer is fully idempotent and only updates rows present in the JSON.
 
 **Q：`bible_books_zh.json` 與 `bible_books_en.json` 節數完全相同**  
 A：請重新執行 `cmd/spec-builder/main.go`。規格檔必須從網站即時抓取才能正確反映兩語言的版本差異。

@@ -123,6 +123,22 @@ func NewClientWithConcurrency(baseURL, apiKey string, timeoutSec, maxConnsPerHos
 		httpClient: &http.Client{
 			Timeout:   time.Duration(timeoutSec) * time.Second,
 			Transport: transport,
+			// Enforce HTTPS on redirects and cap redirect depth at 3.
+			// Go's default CheckRedirect does NOT strip custom request headers
+			// on redirect, so a redirect to an http:// URL (e.g. MITM or
+			// misconfigured server) would forward x-yvp-app-key in cleartext
+			// (CWE-319). Cap depth matches BibleComScraper's policy.
+			CheckRedirect: func(req *http.Request, via []*http.Request) error {
+				if req.URL.Scheme != "https" {
+					return fmt.Errorf(
+						"redirect to non-HTTPS URL refused (would expose x-yvp-app-key): %s",
+						req.URL)
+				}
+				if len(via) >= 3 {
+					return fmt.Errorf("stopped after %d redirects", len(via))
+				}
+				return nil
+			},
 		},
 	}, nil
 }

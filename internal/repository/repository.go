@@ -346,8 +346,25 @@ func (r *BibleRepository) GetOrCreateSection(bookID, chapterID uuid.UUID, sort i
 //  3. Row exists, both columns identical → no-op.
 //  4. Row exists, any column differs → UPDATE.
 //
-// Note: sub_title is not extracted by the crawler so it is left untouched.
+// sub_title is left empty (the springbible and YouVersion crawlers do not extract
+// section headings). Use UpsertSectionContentFull when sub_title is available.
 func (r *BibleRepository) UpsertSectionContent(sectionID uuid.UUID, lang, title, content string) error {
+	return r.UpsertSectionContentFull(sectionID, lang, title, content, "")
+}
+
+// UpsertSectionContentFull is the full-parameter variant of UpsertSectionContent
+// that also persists the optional sub_title column. It is used by the biblecom
+// importer which extracts section headings (pericopes) from the HTML.
+//
+// sub_title may be empty; in that case the column is stored as an empty string
+// (not NULL) for consistency with rows written by UpsertSectionContent.
+//
+// Strategy (mirrors UpsertSectionContent):
+//  1. SELECT current title, content, sub_title for (bible_section_id, language).
+//  2. Row missing → INSERT with all four values.
+//  3. Row exists, all three columns identical → no-op.
+//  4. Row exists, any column differs → UPDATE all three.
+func (r *BibleRepository) UpsertSectionContentFull(sectionID uuid.UUID, lang, title, content, subTitle string) error {
 	if err := validateUUID("sectionID", sectionID); err != nil {
 		return err
 	}
@@ -363,34 +380,81 @@ func (r *BibleRepository) UpsertSectionContent(sectionID uuid.UUID, lang, title,
 	if err != nil {
 		return err
 	}
+	// sub_title is optional; normalise whitespace but do not reject empty values.
+	normalizedSubTitle := strings.TrimSpace(subTitle)
+	// Guard input lengths to prevent unbounded DB column writes from tampered
+	// JSON files (CWE-400). Limits are generous for any real Bible content.
+	const (
+		maxTitleBytes    = 512        // FormatVerseTitle / FormatChapterTitle never approach this
+		maxContentBytes  = 64 * 1024 // 64 KiB — far beyond the longest real verse
+		maxSubTitleBytes = 1024      // Pericope headings are short; 1 KiB is ample
+	)
+	if len(normalizedTitle) > maxTitleBytes {
+		return fmt.Errorf("title too long (%d bytes, max %d) for section %s",
+			len(normalizedTitle), maxTitleBytes, sectionID)
+	}
+	if len(normalizedContent) > maxContentBytes {
+		return fmt.Errorf("content too long (%d bytes, max %d) for section %s",
+			len(normalizedContent), maxContentBytes, sectionID)
+	}
+	if len(normalizedSubTitle) > maxSubTitleBytes {
+		return fmt.Errorf("sub_title too long (%d bytes, max %d) for section %s",
+			len(normalizedSubTitle), maxSubTitleBytes, sectionID)
+	}
 
+	// sub_title is a nullable column; rows written by earlier crawlers
+	// (springbible, YouVersion) have sub_title = NULL. Scanning NULL into a
+	// plain string would cause a conversion error, so sql.NullString is used.
 	var storedTitle, storedContent string
+	var storedSubTitle sql.NullString
 	err = r.DB.QueryRow(
-		`SELECT title, content FROM bibles.bible_section_contents
+		`SELECT title, content, sub_title FROM bibles.bible_section_contents
 		 WHERE bible_section_id = $1 AND language = $2`,
 		sectionID, normalizedLang,
-	).Scan(&storedTitle, &storedContent)
+	).Scan(&storedTitle, &storedContent, &storedSubTitle)
+
+	// When NullString.Valid is false (legacy NULL row from an earlier crawler),
+	// .String is "" — matching the normalizedSubTitle value this function always
+	// writes as "" rather than NULL. This means no IS NULL logic is ever needed
+	// on re-runs: plain string equality handles both new and legacy rows.
+	storedSub := storedSubTitle.String
 
 	switch err {
 	case nil:
-		// Row exists – skip if both values are identical.
-		if storedTitle == normalizedTitle && storedContent == normalizedContent {
+		// Row exists. Skip only when all three values are identical AND the
+		// stored sub_title is already a proper empty string (not SQL NULL).
+		// Legacy rows written by earlier crawlers (springbible, YouVersion)
+		// have sub_title = NULL. Treating NULL == "" in the equality check
+		// would leave those rows permanently as NULL while new rows get "".
+		// By also checking storedSubTitle.Valid we force a one-time UPDATE that
+		// normalises NULL → "" on the first biblecom-importer run, so downstream
+		// consumers can rely on plain string equality (WHERE sub_title = '')
+		// without needing IS NULL guards.
+		if storedTitle == normalizedTitle &&
+			storedContent == normalizedContent &&
+			storedSub == normalizedSubTitle &&
+			storedSubTitle.Valid {
 			return nil
 		}
+		// Update all three columns together even when only one changed.
+		// A partial-update path would add branching complexity with no
+		// meaningful gain at this write volume.
 		_, err = r.DB.Exec(
 			`UPDATE bibles.bible_section_contents
-			 SET title = $3, content = $4
+			 SET title = $3, content = $4, sub_title = $5
 			 WHERE bible_section_id = $1 AND language = $2`,
-			sectionID, normalizedLang, normalizedTitle, normalizedContent,
+			sectionID, normalizedLang, normalizedTitle, normalizedContent, normalizedSubTitle,
 		)
 		if err != nil {
 			return fmt.Errorf("failed to update bible_section_contents: %w", err)
 		}
 	case sql.ErrNoRows:
+		// Store "" rather than NULL for sub_title so every future SELECT+compare
+		// cycle uses plain string equality without IS NULL / IS NOT NULL handling.
 		_, err = r.DB.Exec(
-			`INSERT INTO bibles.bible_section_contents (bible_section_id, language, title, content)
-			 VALUES ($1, $2, $3, $4)`,
-			sectionID, normalizedLang, normalizedTitle, normalizedContent,
+			`INSERT INTO bibles.bible_section_contents (bible_section_id, language, title, content, sub_title)
+			 VALUES ($1, $2, $3, $4, $5)`,
+			sectionID, normalizedLang, normalizedTitle, normalizedContent, normalizedSubTitle,
 		)
 		if err != nil {
 			return fmt.Errorf("failed to insert bible_section_contents: %w", err)

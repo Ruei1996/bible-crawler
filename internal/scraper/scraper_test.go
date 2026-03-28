@@ -208,8 +208,8 @@ const (
 	sqlSelectSection = `SELECT id FROM bibles.bible_sections WHERE bible_book_id = $1 AND bible_chapter_id = $2 AND sort = $3`
 	sqlInsertSection = `INSERT INTO bibles.bible_sections (bible_book_id, bible_chapter_id, sort) VALUES ($1, $2, $3) ON CONFLICT (bible_book_id, bible_chapter_id, sort) DO NOTHING RETURNING id`
 
-	sqlSelectSectionContent = `SELECT title, content FROM bibles.bible_section_contents WHERE bible_section_id = $1 AND language = $2`
-	sqlInsertSectionContent = `INSERT INTO bibles.bible_section_contents (bible_section_id, language, title, content) VALUES ($1, $2, $3, $4)`
+	sqlSelectSectionContent = `SELECT title, content, sub_title FROM bibles.bible_section_contents WHERE bible_section_id = $1 AND language = $2`
+	sqlInsertSectionContent = `INSERT INTO bibles.bible_section_contents (bible_section_id, language, title, content, sub_title) VALUES ($1, $2, $3, $4, $5)`
 )
 
 func newScraper(repo *repository.BibleRepository, bspec *spec.BibleSpec, cfg *config.Config) *BibleScraper {
@@ -255,7 +255,7 @@ func TestSaveVerse_ValidEnglish(t *testing.T) {
 	mock.ExpectQuery(qre(sqlInsertSection)).
 		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(secID))
 	mock.ExpectQuery(qre(sqlSelectSectionContent)).
-		WillReturnRows(sqlmock.NewRows([]string{"title", "content"}))
+		WillReturnRows(sqlmock.NewRows([]string{"title", "content", "sub_title"}))
 	mock.ExpectExec(qre(sqlInsertSectionContent)).
 		WillReturnResult(sqlmock.NewResult(1, 1))
 
@@ -274,7 +274,7 @@ func TestSaveVerse_ValidChinese(t *testing.T) {
 	mock.ExpectQuery(qre(sqlInsertSection)).
 		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(secID))
 	mock.ExpectQuery(qre(sqlSelectSectionContent)).
-		WillReturnRows(sqlmock.NewRows([]string{"title", "content"}))
+		WillReturnRows(sqlmock.NewRows([]string{"title", "content", "sub_title"}))
 	mock.ExpectExec(qre(sqlInsertSectionContent)).
 		WillReturnResult(sqlmock.NewResult(1, 1))
 
@@ -454,13 +454,13 @@ func setupChapterMock(mock sqlmock.Sqlmock, chapID, secID uuid.UUID) {
 
 	// UpsertSectionContent – ZH verse 1
 	mock.ExpectQuery(qre(sqlSelectSectionContent)).
-		WillReturnRows(sqlmock.NewRows([]string{"title", "content"}))
+		WillReturnRows(sqlmock.NewRows([]string{"title", "content", "sub_title"}))
 	mock.ExpectExec(qre(sqlInsertSectionContent)).
 		WillReturnResult(sqlmock.NewResult(1, 1))
 
 	// UpsertSectionContent – EN verse 1
 	mock.ExpectQuery(qre(sqlSelectSectionContent)).
-		WillReturnRows(sqlmock.NewRows([]string{"title", "content"}))
+		WillReturnRows(sqlmock.NewRows([]string{"title", "content", "sub_title"}))
 	mock.ExpectExec(qre(sqlInsertSectionContent)).
 		WillReturnResult(sqlmock.NewResult(1, 1))
 }
@@ -550,9 +550,9 @@ func TestCrawlChapters_UpsertChapterContentError(t *testing.T) {
 	mock.ExpectQuery(qre(sqlSelectSection)).WillReturnRows(sqlmock.NewRows([]string{"id"}))
 	mock.ExpectQuery(qre(sqlInsertSection)).WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(secID))
 	mock.ExpectQuery(qre(sqlSelectSection)).WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(secID))
-	mock.ExpectQuery(qre(sqlSelectSectionContent)).WillReturnRows(sqlmock.NewRows([]string{"title", "content"}))
+	mock.ExpectQuery(qre(sqlSelectSectionContent)).WillReturnRows(sqlmock.NewRows([]string{"title", "content", "sub_title"}))
 	mock.ExpectExec(qre(sqlInsertSectionContent)).WillReturnResult(sqlmock.NewResult(1, 1))
-	mock.ExpectQuery(qre(sqlSelectSectionContent)).WillReturnRows(sqlmock.NewRows([]string{"title", "content"}))
+	mock.ExpectQuery(qre(sqlSelectSectionContent)).WillReturnRows(sqlmock.NewRows([]string{"title", "content", "sub_title"}))
 	mock.ExpectExec(qre(sqlInsertSectionContent)).WillReturnResult(sqlmock.NewResult(1, 1))
 
 	bspec := makeMinimalSpec(0, 1, 1)
@@ -607,9 +607,9 @@ func TestCrawlChapters_InvalidVerseValue(t *testing.T) {
 	mock.ExpectQuery(qre(sqlSelectSection)).WillReturnRows(sqlmock.NewRows([]string{"id"}))
 	mock.ExpectQuery(qre(sqlInsertSection)).WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(secID))
 	mock.ExpectQuery(qre(sqlSelectSection)).WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(secID))
-	mock.ExpectQuery(qre(sqlSelectSectionContent)).WillReturnRows(sqlmock.NewRows([]string{"title", "content"}))
+	mock.ExpectQuery(qre(sqlSelectSectionContent)).WillReturnRows(sqlmock.NewRows([]string{"title", "content", "sub_title"}))
 	mock.ExpectExec(qre(sqlInsertSectionContent)).WillReturnResult(sqlmock.NewResult(1, 1))
-	mock.ExpectQuery(qre(sqlSelectSectionContent)).WillReturnRows(sqlmock.NewRows([]string{"title", "content"}))
+	mock.ExpectQuery(qre(sqlSelectSectionContent)).WillReturnRows(sqlmock.NewRows([]string{"title", "content", "sub_title"}))
 	mock.ExpectExec(qre(sqlInsertSectionContent)).WillReturnResult(sqlmock.NewResult(1, 1))
 
 	bspec := makeMinimalSpec(0, 1, 2) // maxVerses = 2

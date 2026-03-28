@@ -14,6 +14,7 @@ import (
 "log"
 "os"
 "strconv"
+"strings"
 
 "github.com/joho/godotenv"
 )
@@ -90,6 +91,48 @@ YouVersionRateLimitRPS    float64
 YouVersionMaxRetries      int
 YouVersionRetryBaseMS     int
 YouVersionCheckpointFile  string
+
+// ── Bible.com HTML crawler ────────────────────────────────────────────────
+// Settings for cmd/biblecom-crawler, which scrapes bible.com HTML pages for
+// the CUNP-上帝 (Chinese) and NIV (English) translations and writes the
+// results to two JSON files (BibleComOutputZH / BibleComOutputEN).
+//
+// BibleComZHBaseURL        — base URL for Chinese CUNP-上帝 pages.
+//                            Default: https://www.bible.com/bible/414
+// BibleComENBaseURL        — base URL for English NIV pages.
+//                            Default: https://www.bible.com/bible/111
+// BibleComZHVersionSuffix  — URL suffix appended after the chapter number.
+//                            The Chinese suffix contains percent-encoded
+//                            Chinese characters (上帝 = %E4%B8%8A%E5%B8%9D).
+//                            Default: CUNP-%E4%B8%8A%E5%B8%9D
+// BibleComENVersionSuffix  — URL suffix for the English version.
+//                            Default: NIV
+// BibleComWorkers          — number of parallel worker goroutines (default 5).
+//                            Increase with caution — bible.com may rate-limit
+//                            or block excessive parallel connections.
+// BibleComRateLimitRPS     — token-bucket rate limit in requests per second
+//                            across all workers (default 2.0). Should be
+//                            ≤ BibleComWorkers to avoid worker starvation.
+// BibleComTimeoutSec       — per-request HTTP timeout in seconds (default 30).
+// BibleComOutputZH         — output JSON file path for Chinese content.
+//                            Default: youversion-bible_books_zh.json
+// BibleComOutputEN         — output JSON file path for English content.
+//                            Default: youversion-bible_books_en.json
+// BibleComFilterSorts     — optional comma-separated list of book sort numbers
+//                            (1-66) to limit the crawl to specific books.
+//                            Example: BIBLECOM_FILTER_SORTS=65 re-crawls only
+//                            Jude without touching the other 65 books.
+//                            When unset, all 66 books are crawled.
+BibleComFilterSorts     []int
+BibleComZHBaseURL        string
+BibleComENBaseURL        string
+BibleComZHVersionSuffix  string
+BibleComENVersionSuffix  string
+BibleComWorkers          int
+BibleComRateLimitRPS     float64
+BibleComTimeoutSec       int
+BibleComOutputZH         string
+BibleComOutputEN         string
 }
 
 // Load reads configuration from a .env file (if present) then from the process
@@ -126,6 +169,20 @@ YouVersionRateLimitRPS:   getEnvFloat64("YOUVERSION_RATE_LIMIT_RPS", 2.0),
 YouVersionMaxRetries:     getEnvInt("YOUVERSION_MAX_RETRIES", 5),
 YouVersionRetryBaseMS:    getEnvInt("YOUVERSION_RETRY_BASE_MS", 1000),
 YouVersionCheckpointFile: getEnv("YOUVERSION_CHECKPOINT_FILE", ""),
+
+// Bible.com HTML crawler defaults. The ZH version suffix contains
+// percent-encoded Chinese characters for 上帝 (%E4%B8%8A%E5%B8%9D).
+// These defaults work without any .env override for a standard crawl.
+BibleComFilterSorts:     getEnvIntSlice("BIBLECOM_FILTER_SORTS"),
+BibleComZHBaseURL:       getEnv("BIBLECOM_ZH_BASE_URL", "https://www.bible.com/bible/414"),
+BibleComENBaseURL:       getEnv("BIBLECOM_EN_BASE_URL", "https://www.bible.com/bible/111"),
+BibleComZHVersionSuffix: getEnv("BIBLECOM_ZH_VERSION_SUFFIX", "CUNP-%E4%B8%8A%E5%B8%9D"),
+BibleComENVersionSuffix: getEnv("BIBLECOM_EN_VERSION_SUFFIX", "NIV"),
+BibleComWorkers:         getEnvInt("BIBLECOM_WORKERS", 5),
+BibleComRateLimitRPS:    getEnvFloat64("BIBLECOM_RATE_LIMIT_RPS", 2.0),
+BibleComTimeoutSec:      getEnvInt("BIBLECOM_TIMEOUT_SEC", 30),
+BibleComOutputZH:        getEnv("BIBLECOM_OUTPUT_ZH", "youversion-bible_books_zh.json"),
+BibleComOutputEN:        getEnv("BIBLECOM_OUTPUT_EN", "youversion-bible_books_en.json"),
 }
 }
 
@@ -147,6 +204,36 @@ return n
 log.Printf("Config warning: %s=%q is not a valid integer, using default %d", key, value, fallback)
 }
 return fallback
+}
+
+// getEnvIntSlice returns a slice of integers parsed from a comma-separated env
+// var. Values must be valid Bible book sort numbers in the range [1, 66].
+// Elements that are not valid integers or outside the [1, 66] range are skipped
+// with a warning. Returns nil when the env var is unset or empty (meaning "no
+// filter" to callers).
+func getEnvIntSlice(key string) []int {
+value, exists := os.LookupEnv(key)
+if !exists || strings.TrimSpace(value) == "" {
+return nil
+}
+parts := strings.Split(value, ",")
+result := make([]int, 0, len(parts))
+for _, p := range parts {
+p = strings.TrimSpace(p)
+n, err := strconv.Atoi(p)
+if err != nil {
+log.Printf("Config warning: %s element %q is not a valid integer, skipping", key, p)
+continue
+}
+// Bible book sort numbers are 1–66; values outside this range will
+// silently match no book, producing a zero-item crawl that is hard to debug.
+if n < 1 || n > 66 {
+log.Printf("Config warning: %s element %d is outside valid range [1, 66], skipping", key, n)
+continue
+}
+result = append(result, n)
+}
+return result
 }
 
 // getEnvFloat64 returns the float64 env var value for key, or fallback when it
