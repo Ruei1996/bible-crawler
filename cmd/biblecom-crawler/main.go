@@ -40,7 +40,6 @@ import (
 	"os"
 	"os/signal"
 	"regexp"
-	"strings"
 	"syscall"
 
 	"bible-crawler/internal/biblecom"
@@ -48,6 +47,11 @@ import (
 )
 
 func main() {
+	// log.Lmsgprefix moves the prefix to just before the message text (after
+	// date + time), producing: "2024/01/01 01:02:03 [biblecom-crawler] msg"
+	// rather than the default prefix-first layout. Timestamp-first ordering
+	// lets log aggregators sort and filter lines without skipping over a
+	// variable-length prefix column.
 	log.SetFlags(log.Ldate | log.Ltime | log.Lmsgprefix)
 	log.SetPrefix("[biblecom-crawler] ")
 
@@ -120,17 +124,21 @@ func validateConfig(cfg *config.Config) error {
 		}
 	}
 
-	// Enforce HTTPS + bible.com host on base URLs to prevent accidental SSRF
-	// (CWE-918: Server-Side Request Forgery) or TLS downgrade (CWE-319:
-	// Cleartext Transmission of Sensitive Information) from a misconfigured or
-	// tampered env var.
+	// Enforce HTTPS + exact bible.com host on base URLs to prevent SSRF
+	// (CWE-918) or TLS downgrade (CWE-319) from misconfigured env vars.
+	// HasSuffix(host, "bible.com") would permit "evilbible.com", so we use an
+	// explicit allowlist keyed on u.Hostname() (strips port if present).
+	allowedHosts := map[string]bool{
+		"bible.com":     true,
+		"www.bible.com": true,
+	}
 	for _, f := range []struct{ name, val string }{
 		{"BIBLECOM_ZH_BASE_URL", cfg.BibleComZHBaseURL},
 		{"BIBLECOM_EN_BASE_URL", cfg.BibleComENBaseURL},
 	} {
 		u, err := url.Parse(f.val)
-		if err != nil || u.Scheme != "https" || !strings.HasSuffix(u.Host, "bible.com") {
-			return fmt.Errorf("%s must be an https://www.bible.com/... URL, got %q", f.name, f.val)
+		if err != nil || u.Scheme != "https" || !allowedHosts[u.Hostname()] {
+			return fmt.Errorf("%s must be an https://[www.]bible.com/... URL, got %q", f.name, f.val)
 		}
 	}
 
