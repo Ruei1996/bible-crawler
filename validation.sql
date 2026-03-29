@@ -4,19 +4,25 @@
 -- Validates the bibles schema against the canonical 66-book spec.
 --
 -- Structure:
---   SECTION 0 — Global summary (counts & missing at every level)
---   SECTION 1 — Books  missing Chinese or English title
---   SECTION 2 — Chapters missing Chinese or English title
---   SECTION 3 — Sections (verses) missing Chinese or English content
---   SECTION 4 — Spec-driven structural check (expected vs actual chapters)
---   SECTION 5 — Versification-difference audit (ZH vs EN section counts)
---   SECTION 6 — Chapter content viewer: query by book name + chapter number
---   SECTION 7 — Missing verse finder: show only absent (verse, language) pairs
---              for a given book + chapter
+--   SECTION 0  — Global summary (counts & missing at every level)
+--   SECTION 1  — Books  missing Chinese or English title
+--   SECTION 2  — Chapters missing Chinese or English title
+--   SECTION 3  — Sections (verses) missing Chinese or English content
+--   SECTION 4  — Spec-driven structural check (expected vs actual chapters)
+--   SECTION 5  — Versification-difference audit (ZH vs EN section counts)
+--   SECTION 6  — Chapter content viewer: query by book name + chapter number
+--   SECTION 7  — Missing verse finder: show only absent (verse, language) pairs
+--               for a given book + chapter
+--   SECTION 8  — Post-import verse count summary (quick totals per language)
+--   SECTION 9  — Empty content guard (any row = import error; expect 0 rows)
+--   SECTION 10 — Bracket-verse spot-check: the 16 NIV textually-disputed verses
+--               that previously caused WARN/skipped; all must have non-empty
+--               English content after the cross-reference resolution fix
 --
--- A fully loaded and repaired database returns:
---   • 0 rows  in sections 1, 2, 3, 4, 5
+-- A fully loaded database returns:
+--   • 0 rows  in sections 1, 2, 3, 4, 5, 9, and all english_status = 'OK' in 10
 --   • missing_chinese = 0 and missing_english = 0 in section 0
+--   • chinese: 31,092 | english: 31,103 total_section_contents in section 8
 -- ============================================================
 
 
@@ -110,6 +116,7 @@ ORDER BY bb.sort;
 SELECT
     bb.sort                                                         AS book_sort,
     COALESCE(bbc_zh.title, '⚠ 缺書名')                             AS book_name_zh,
+    COALESCE(bbc_en.title, '⚠ MISSING')                            AS book_name_en,
     bc.sort                                                         AS chapter_sort,
     COALESCE(bcc_zh.title, '⚠ MISSING')                            AS chapter_title_zh,
     COALESCE(bcc_en.title, '⚠ MISSING')                            AS chapter_title_en,
@@ -120,6 +127,8 @@ JOIN  bibles.bible_books bb
        ON bb.id = bc.bible_book_id
 LEFT JOIN bibles.bible_book_contents bbc_zh
        ON bbc_zh.bible_book_id = bb.id AND bbc_zh.language = 'chinese'
+LEFT JOIN bibles.bible_book_contents bbc_en
+       ON bbc_en.bible_book_id = bb.id AND bbc_en.language = 'english'
 LEFT JOIN bibles.bible_chapter_contents bcc_zh
        ON bcc_zh.bible_chapter_id = bc.id AND bcc_zh.language = 'chinese'
 LEFT JOIN bibles.bible_chapter_contents bcc_en
@@ -138,6 +147,7 @@ ORDER BY bb.sort, bc.sort;
 SELECT
     bb.sort                                                         AS book_sort,
     COALESCE(bbc_zh.title, '⚠ 缺書名')                             AS book_name_zh,
+    COALESCE(bbc_en.title, '⚠ MISSING')                            AS book_name_en,
     bc.sort                                                         AS chapter_sort,
     bs.sort                                                         AS section_sort,
     COALESCE(bsc_zh.title, '⚠ MISSING')                            AS section_title_zh,
@@ -151,6 +161,8 @@ JOIN  bibles.bible_chapters bc
        ON bc.id = bs.bible_chapter_id
 LEFT JOIN bibles.bible_book_contents bbc_zh
        ON bbc_zh.bible_book_id = bb.id AND bbc_zh.language = 'chinese'
+LEFT JOIN bibles.bible_book_contents bbc_en
+       ON bbc_en.bible_book_id = bb.id AND bbc_en.language = 'english'
 LEFT JOIN bibles.bible_section_contents bsc_zh
        ON bsc_zh.bible_section_id = bs.id AND bsc_zh.language = 'chinese'
 LEFT JOIN bibles.bible_section_contents bsc_en
@@ -262,6 +274,7 @@ ORDER BY s.book_sort;
 SELECT
     bb.sort                                                         AS book_sort,
     COALESCE(bbc_zh.title, '?')                                     AS book_name_zh,
+    COALESCE(bbc_en.title, '?')                                     AS book_name_en,
     bc.sort                                                         AS chapter_sort,
     COUNT(DISTINCT bsc_zh.id)                                       AS zh_section_count,
     COUNT(DISTINCT bsc_en.id)                                       AS en_section_count,
@@ -271,13 +284,15 @@ JOIN  bibles.bible_books bb
        ON bb.id = bc.bible_book_id
 LEFT JOIN bibles.bible_book_contents bbc_zh
        ON bbc_zh.bible_book_id = bb.id AND bbc_zh.language = 'chinese'
+LEFT JOIN bibles.bible_book_contents bbc_en
+       ON bbc_en.bible_book_id = bb.id AND bbc_en.language = 'english'
 LEFT JOIN bibles.bible_sections bs
        ON bs.bible_chapter_id = bc.id
 LEFT JOIN bibles.bible_section_contents bsc_zh
        ON bsc_zh.bible_section_id = bs.id AND bsc_zh.language = 'chinese'
 LEFT JOIN bibles.bible_section_contents bsc_en
        ON bsc_en.bible_section_id = bs.id AND bsc_en.language = 'english'
-GROUP BY bb.sort, bbc_zh.title, bc.sort
+GROUP BY bb.sort, bbc_zh.title, bbc_en.title, bc.sort
 HAVING COUNT(DISTINCT bsc_zh.id) <> COUNT(DISTINCT bsc_en.id)
 ORDER BY bb.sort, bc.sort;
 
@@ -411,3 +426,132 @@ WHERE      bsc.id IS NULL             -- keep only the gaps (missing content row
 ORDER BY
     avlp.verse_num ASC,               -- natural verse order (integer, not string)
     avlp.language  ASC;               -- 'chinese' before 'english' within same verse
+
+
+-- ── SECTION 8: Post-import verse count summary ───────────────
+-- Quick totals per language — run this first after every crawl + import.
+-- Expected counts after a full bible.com (NIV + CUNP) crawl:
+--   chinese: 31,092 total_section_contents | 31,092 unique sections
+--   english: 31,103 total_section_contents | 31,103 unique sections
+-- (EN > ZH because NIV includes 16 bracket-labeled textually-disputed
+--  verses that CUV does not have versification gaps for.)
+--
+-- Output columns:
+--   language               — 'chinese' | 'english'
+--   total_section_contents — total rows in bible_section_contents
+--   unique_sections        — distinct bibles.bible_sections rows covered
+--   unique_chapters        — distinct chapters covered
+--   unique_books           — should always be 66
+
+SELECT
+    bsc.language,
+    COUNT(*)                                                        AS total_section_contents,
+    COUNT(DISTINCT bs.id)                                           AS unique_sections,
+    COUNT(DISTINCT bc.id)                                           AS unique_chapters,
+    COUNT(DISTINCT bb.id)                                           AS unique_books
+FROM bibles.bible_section_contents bsc
+JOIN bibles.bible_sections  bs ON bs.id = bsc.bible_section_id
+JOIN bibles.bible_chapters  bc ON bc.id = bs.bible_chapter_id
+JOIN bibles.bible_books     bb ON bb.id = bc.bible_book_id
+GROUP BY bsc.language
+ORDER BY bsc.language;
+
+
+-- ── SECTION 9: Empty content guard ───────────────────────────
+-- Expect 0 rows.
+-- bible_section_contents.content must never be NULL or blank.
+-- Before the cross-reference resolution fix (cmd/biblecom-crawler),
+-- this query would return 16 English rows for NIV bracket verses
+-- (e.g. Matthew 17:21, Mark 9:44).  All rows here indicate an
+-- import error that must be investigated.
+--
+-- Output columns:
+--   book_sort / book_name_zh / book_name_en — identifies the book
+--   chapter_sort / verse_sort               — location of the empty verse
+--   language                                — 'chinese' | 'english'
+--   content_preview                         — shows NULL or whitespace-only text
+
+SELECT
+    bb.sort                                                         AS book_sort,
+    COALESCE(bbc_zh.title, '⚠ 缺書名')                             AS book_name_zh,
+    COALESCE(bbc_en.title, '⚠ MISSING')                            AS book_name_en,
+    bc.sort                                                         AS chapter_sort,
+    bs.sort                                                         AS verse_sort,
+    bsc.language,
+    COALESCE(bsc.content, 'NULL')                                   AS content_preview
+FROM bibles.bible_section_contents bsc
+JOIN  bibles.bible_sections  bs  ON bs.id  = bsc.bible_section_id
+JOIN  bibles.bible_chapters  bc  ON bc.id  = bs.bible_chapter_id
+JOIN  bibles.bible_books     bb  ON bb.id  = bc.bible_book_id
+LEFT JOIN bibles.bible_book_contents bbc_zh
+       ON bbc_zh.bible_book_id = bb.id AND bbc_zh.language = 'chinese'
+LEFT JOIN bibles.bible_book_contents bbc_en
+       ON bbc_en.bible_book_id = bb.id AND bbc_en.language = 'english'
+WHERE TRIM(COALESCE(bsc.content, '')) = ''
+ORDER BY bb.sort, bc.sort, bs.sort, bsc.language;
+
+
+-- ── SECTION 10: Bracket-verse spot-check (NIV) ───────────────
+-- Verifies the 16 textually-disputed NIV verses that were previously
+-- stored as empty content (causing 16 WARN lines during import).
+-- After the cross-reference resolution fix:
+--   • 7 verses resolved via cross-ref  → content copied from referenced verse
+--   • 9 verses resolved via note text  → footnote body text stored as content
+-- All english_status cells must show 'OK'.  Any '⚠ EMPTY' means the
+-- bracket-verse fix did not propagate through correctly.
+--
+-- Resolution method column values:
+--   cross-ref  — content sourced from another verse (cross_ref field in JSON)
+--   note-text  — content is the footnote body text (fallback when no cross-ref)
+
+WITH bracket_verses (book_sort, chapter_sort, verse_sort, resolution_method, cross_ref_source) AS (
+    VALUES
+        -- 7 resolved via cross-reference (content = another verse's prose)
+        (40, 17, 21, 'cross-ref',  'MRK.9.29'),
+        (40, 18, 11, 'cross-ref',  'LUK.19.10'),
+        (40, 23, 14, 'cross-ref',  'MRK.12.40'),
+        (41, 11, 26, 'cross-ref',  'MAT.6.15'),
+        (41, 15, 28, 'cross-ref',  'LUK.22.37'),
+        (42, 17, 36, 'cross-ref',  'MAT.24.40'),
+        (42, 23, 17, 'cross-ref',  'MAT.27.15'),
+        -- 9 using fallback note body text (no <span class="ref"> in footnote)
+        (41,  7, 16, 'note-text',  ''),
+        (41,  9, 44, 'note-text',  ''),
+        (41,  9, 46, 'note-text',  ''),
+        (43,  5,  4, 'note-text',  ''),
+        (44,  8, 37, 'note-text',  ''),
+        (44, 15, 34, 'note-text',  ''),
+        (44, 24,  7, 'note-text',  ''),
+        (44, 28, 29, 'note-text',  ''),
+        (45, 16, 24, 'note-text',  '')
+)
+SELECT
+    bv.book_sort,
+    COALESCE(bbc_zh.title, '⚠ 缺書名')                             AS book_name_zh,
+    COALESCE(bbc_en.title, '⚠ MISSING')                            AS book_name_en,
+    bv.chapter_sort,
+    bv.verse_sort,
+    bv.resolution_method,
+    NULLIF(bv.cross_ref_source, '')                                 AS cross_ref_source,
+    LEFT(COALESCE(bsc_zh.content, '⚠ MISSING'), 60)                AS chinese_content,
+    LEFT(COALESCE(bsc_en.content, '⚠ MISSING'), 60)                AS english_content,
+    CASE
+        WHEN bsc_en.content IS NULL OR TRIM(bsc_en.content) = ''
+        THEN '⚠ EMPTY'
+        ELSE 'OK'
+    END                                                             AS english_status
+FROM bracket_verses bv
+JOIN  bibles.bible_books     bb  ON bb.sort               = bv.book_sort
+JOIN  bibles.bible_chapters  bc  ON bc.bible_book_id      = bb.id
+                                AND bc.sort               = bv.chapter_sort
+JOIN  bibles.bible_sections  bs  ON bs.bible_chapter_id   = bc.id
+                                AND bs.sort               = bv.verse_sort
+LEFT JOIN bibles.bible_book_contents bbc_zh
+       ON bbc_zh.bible_book_id = bb.id AND bbc_zh.language = 'chinese'
+LEFT JOIN bibles.bible_book_contents bbc_en
+       ON bbc_en.bible_book_id = bb.id AND bbc_en.language = 'english'
+LEFT JOIN bibles.bible_section_contents bsc_zh
+       ON bsc_zh.bible_section_id = bs.id AND bsc_zh.language = 'chinese'
+LEFT JOIN bibles.bible_section_contents bsc_en
+       ON bsc_en.bible_section_id = bs.id AND bsc_en.language = 'english'
+ORDER BY bv.book_sort, bv.chapter_sort, bv.verse_sort;
