@@ -96,8 +96,7 @@ type VerseData struct {
 //
 // The YouVersion Platform API v1 returns exactly three fields per passage: id,
 // content, and reference. There is NO field for pericope headings, section
-// titles, or sub-titles. Verified against live API and the saved
-// youversion-bible-api-result.json sample file.
+// titles, or sub-titles. Verified against the live API.
 //
 // As a consequence, the bibles.bible_section_contents.sub_title column will
 // always be NULL when data originates from this API. This is a confirmed API

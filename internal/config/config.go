@@ -53,8 +53,7 @@ CrawlerRandomDelayMS int // additional random jitter per request (ms)
 HTTPTimeoutSec       int // per-request HTTP timeout (seconds)
 
 // ── YouVersion API ───────────────────────────────────────────────────────
-// Settings for cmd/youversion-fetcher and cmd/youversion-crawler, both of
-// which call the YouVersion Platform API.
+// Settings for cmd/youversion-crawler, which calls the YouVersion Platform API.
 //
 // YouVersionAPIKey      — app key sent as the x-yvp-app-key request header.
 //                         Required; obtain from https://platform.youversion.com

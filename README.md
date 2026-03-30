@@ -549,14 +549,6 @@ The importer reads `BIBLECOM_OUTPUT_ZH` and `BIBLECOM_OUTPUT_EN` from `.env`. It
 
 ---
 
-#### Utility: YouVersion API Explorer
-
-`cmd/youversion-fetcher` is a developer tool that calls every YouVersion Platform API endpoint and writes the combined responses to `youversion-bible-api-result.json`. Useful for documenting the API response shape and as a local cache for development.
-
-```bash
-YOUVERSION_API_KEY=<your-key> go run cmd/youversion-fetcher/main.go
-```
-
 ### Step 6: Validate (optional)
 
 ---
@@ -676,8 +668,6 @@ bible-crawler/
 │   │   └── main.go               # Stage 0: discovers verse counts, writes JSON spec files
 │   ├── youversion-crawler/
 │   │   └── main.go               # YouVersion API crawl: Phase 1 (DB setup) + Phase 2 (JSONL)
-│   ├── youversion-fetcher/
-│   │   └── main.go               # Dev tool: explores YouVersion API → youversion-bible-api-result.json
 │   └── youversion-importer/
 │       └── main.go               # Reads JSONL checkpoint → batch-writes verses to PostgreSQL
 ├── internal/

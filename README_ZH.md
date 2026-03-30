@@ -545,14 +545,6 @@ go run cmd/biblecom-importer/main.go
 
 ---
 
-#### 工具程式：YouVersion API 探索器
-
-`cmd/youversion-fetcher` 是開發者工具，呼叫所有 YouVersion Platform API 端點並將結果合併寫入 `youversion-bible-api-result.json`。適合用於記錄 API 回應格式，或作為本地開發快取。
-
-```bash
-YOUVERSION_API_KEY=<your-key> go run cmd/youversion-fetcher/main.go
-```
-
 ### 步驟 6：驗證資料（選擇性）
 
 對資料庫執行專案根目錄的 `validation.sql`。查詢涵蓋三個層級（書、章、節）。第 1–3 節（缺漏偵測）應返回 **0 筆**結果；第 5 節（版本差異稽核）會列出預期的版本差異章節，這是正常現象。
@@ -674,8 +666,6 @@ bible-crawler/
 │   │   └── main.go               # Stage 0：發現節數，寫入 JSON 規格檔
 │   ├── youversion-crawler/
 │   │   └── main.go               # YouVersion API 爬蟲：Phase 1（DB 建置）+ Phase 2（JSONL）
-│   ├── youversion-fetcher/
-│   │   └── main.go               # 開發工具：探索 YouVersion API → youversion-bible-api-result.json
 │   └── youversion-importer/
 │       └── main.go               # 讀取 JSONL 斷點檔案 → 批次寫入 PostgreSQL
 ├── internal/
