@@ -213,11 +213,55 @@ func ParseChapter(rawHTML string, bookUSFM string, chapNum int) ([]VerseOutput, 
 	chapterSel.Children().Each(func(_ int, child *goquery.Selection) {
 		// Detect section-heading containers. The heading text lives inside a
 		// span with class containing "__heading" (stable semantic suffix used
-		// by both Chinese __s and English __s1 containers).
+		// by both Chinese __s and English __s1/__ms1 containers).
 		// FindMatcher reuses the pre-compiled headingMatcher selector instead
 		// of calling cascadia.MustCompile on every child div iteration.
 		if heading := child.FindMatcher(headingMatcher); heading.Length() > 0 {
-			pendingSub = strings.TrimSpace(heading.Text())
+			// Exclude USFM reference containers (\r, \mr, \sr). bible.com
+			// renders parallel-passage annotations (e.g. "（代上1‧24－27）") in
+			// a __r div whose inner span still carries the __heading class.
+			// These are cross-reference labels, NOT section headings, and must
+			// not be stored as sub_title.
+			containerClass, _ := child.Attr("class")
+			if isReferenceContainer(containerClass) {
+				return
+			}
+
+			// Extract heading text from only the first (outermost) __heading
+			// span and walk its node tree with collectText, which skips __note
+			// and __label subtrees. Using heading.Text() is incorrect because:
+			//  (a) it concatenates text from ALL matched spans (outer + nested),
+			//      doubling text when __note itself contains __heading children
+			//      (e.g. PSA.119 __cl footnote produces "Psalm 119119 This psalm…");
+			//  (b) it includes footnote body text that should never appear in
+			//      a section heading.
+			var hsb strings.Builder
+			if hFirst := heading.First(); hFirst.Length() > 0 && len(hFirst.Nodes) > 0 {
+				collectText(hFirst.Nodes[0], &hsb, 0)
+			}
+			headingText := normaliseSpace(hsb.String())
+			if headingText == "" {
+				return
+			}
+
+			level := headingContainerLevel(containerClass)
+			if pendingSub == "" {
+				// Any heading type starts a new pendingSub when none is buffered.
+				pendingSub = headingText
+			} else if level <= 2 {
+				// Major-section (ms*) or section-level (s, s1, d, cl) heading
+				// following an existing one: concatenate both lines. They jointly
+				// introduce the next verse block.
+				// Example: PRO.1 __ms1 "Prologue: Exhortations to Embrace Wisdom"
+				// + __s1 "Warning Against the Invitation of Sinful Men" both
+				// precede verse 8 and together form the complete section context.
+				pendingSub = pendingSub + "\n" + headingText
+			}
+			// Sub-section / acrostic (level 3) after a higher heading → first-
+			// heading-wins; discard the lower heading.
+			// Example: PRO.22 __ms1 "Thirty Sayings of the Wise" + __s2 "Saying 1".
+			// The "Saying N" labels are repeated sub-headings; only the ms1 marks
+			// the major section start and belongs in sub_title for that verse.
 			return
 		}
 
@@ -478,7 +522,7 @@ func extractContent(verseSel *goquery.Selection) string {
 		return ""
 	}
 	var sb strings.Builder
-	collectText(verseSel.Nodes[0], &sb)
+	collectText(verseSel.Nodes[0], &sb, 0)
 	return sb.String() // raw; normalised once at assembly in ParseChapter
 }
 
@@ -486,7 +530,13 @@ func extractContent(verseSel *goquery.Selection) string {
 // skipping any subtree rooted at a <span> whose class contains "__note"
 // or "__label". This mirrors the semantics of the previous Clone+Remove
 // approach without any intermediate DOM allocation.
-func collectText(n *html.Node, sb *strings.Builder) {
+//
+// depth guards against adversarial HTML with extreme nesting (CWE-674);
+// the cap of 200 is unreachable for any legitimate bible.com page.
+func collectText(n *html.Node, sb *strings.Builder, depth int) {
+	if depth > 200 {
+		return // defensive cap for abnormally deep DOM trees
+	}
 	if n.Type == html.TextNode {
 		sb.WriteString(n.Data)
 		return
@@ -498,7 +548,7 @@ func collectText(n *html.Node, sb *strings.Builder) {
 		}
 	}
 	for c := n.FirstChild; c != nil; c = c.NextSibling {
-		collectText(c, sb)
+		collectText(c, sb, depth+1)
 	}
 }
 
@@ -651,6 +701,80 @@ func extractNoteBodyText(verseSel *goquery.Selection) string {
 // leading/trailing whitespace. This converts poetry-continuation joins (which
 // may produce double spaces) into clean prose strings without manual trimming
 // at each concatenation point.
+//
+// Fast path: ~95 % of verse strings are already clean (no leading/trailing
+// whitespace, no runs of whitespace). The fast path detects this in O(N)
+// without allocating a []string.
 func normaliseSpace(s string) string {
+	if s == "" {
+		return s
+	}
+	trimmed := strings.TrimSpace(s)
+	// If the string changed length it had leading/trailing whitespace, so we
+	// must normalise. Also normalise when the string contains any double-space,
+	// tab, newline, carriage-return, vertical-tab, form-feed or ideographic
+	// space (U+3000). strings.ContainsAny is SWAR-optimised; no allocation.
+	if len(trimmed) == len(s) &&
+		!strings.Contains(s, "  ") &&
+		!strings.ContainsAny(s, "\t\n\r\v\f\u3000") {
+		return s
+	}
 	return strings.Join(strings.Fields(s), " ")
+}
+
+// classTypeSuffix extracts the USFM element type encoded as the CSS class
+// suffix after the last "__" separator.
+//
+// bible.com always formats container class names as "[HASH_PREFIX]__[TYPE]"
+// (e.g. "ChapterContent-module__cat7xG__ms1"), so the type is reliably the
+// substring after the last "__". Returns "" when no "__" is present.
+func classTypeSuffix(class string) string {
+	if i := strings.LastIndex(class, "__"); i >= 0 {
+		return class[i+2:]
+	}
+	return ""
+}
+
+// isReferenceContainer reports whether a container div's CSS class corresponds
+// to a USFM reference element (\r, \mr, \sr) rather than a section heading.
+//
+// bible.com emits these containers with class suffixes __r, __mr, and __sr.
+// Their inner span still carries the __heading class, so they are matched by
+// headingMatcher, but they represent parallel-passage cross-reference labels
+// (e.g. "（代上1‧24－27）") and must not be captured as sub_title.
+func isReferenceContainer(class string) bool {
+	t := classTypeSuffix(class)
+	return t == "r" || t == "mr" || t == "sr"
+}
+
+// headingContainerLevel returns the priority level of a heading container div
+// based on its USFM element type (the CSS class suffix after the last "__").
+//
+// Levels:
+//
+//	1 — major section (ms, ms1, ms2, ms3): highest-priority; these always
+//	    start a fresh pendingSub when encountered.
+//	2 — section / title (s, s1, d, cl): same importance as level 1 for the
+//	    purposes of this function; a level-2 heading following any existing
+//	    pendingSub is CONCATENATED (not discarded) because both headings
+//	    together provide the full section context for the next verse.
+//	    Example: PRO.1 __ms1 "Prologue…" + __s1 "Warning Against…".
+//	3 — sub-section / acrostic (s2, s3, s4, qa): lowest priority; discarded
+//	    when a higher-priority heading already occupies pendingSub.
+//	    Example: PRO.22 __ms1 "Thirty Sayings" + __s2 "Saying 1" → keep ms1.
+//
+// Unknown USFM types default to level 2 (treated as section-level) so that
+// any future bible.com element we have not yet catalogued is preserved rather
+// than silently discarded.
+func headingContainerLevel(class string) int {
+	switch classTypeSuffix(class) {
+	case "ms", "ms1", "ms2", "ms3":
+		return 1
+	case "s", "s1", "d", "cl":
+		return 2
+	case "s2", "s3", "s4", "qa":
+		return 3
+	default:
+		return 2
+	}
 }

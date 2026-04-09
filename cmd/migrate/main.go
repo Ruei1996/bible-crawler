@@ -60,6 +60,11 @@ func main() {
 	}
 }
 
+// runBackup captures stable (book_sort, chapter_sort, section_sort) coordinates
+// for every cross-schema bible reference into the bibles._orphan_refs_backup table.
+// When withTruncate is true it also cascades a TRUNCATE on bibles.bible_books
+// immediately after the backup, clearing all six bibles schema tables in one
+// statement so the operator can proceed directly to re-crawling.
 func runBackup(db *sqlx.DB, withTruncate bool) {
 	log.Println("Phase: backup — capturing cross-schema bible references...")
 
@@ -84,6 +89,12 @@ func runBackup(db *sqlx.DB, withTruncate bool) {
 	}
 }
 
+// runRestore updates the three cross-schema tables (activities.general_bibles,
+// activities.general_template_bibles, devotions.devotion_bibles) so their
+// bible_id / bible_section_id columns point at the new UUIDs assigned by the
+// re-crawl. It then calls Verify to confirm no orphaned references remain,
+// and — when withCleanup is true and orphan count is 0 — drops the temporary
+// backup table to clean up.
 func runRestore(db *sqlx.DB, withCleanup bool) {
 	log.Println("Phase: restore — updating cross-schema bible references with new UUIDs...")
 

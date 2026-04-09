@@ -14,6 +14,21 @@
 // Because every repository call follows SELECT→INSERT→SELECT (idempotent),
 // re-running the importer is safe and will not create duplicate rows.
 //
+// # Performance design
+//
+// The importer uses bulk (UNNEST-based) repository methods that collapse
+// O(N_verses) individual round-trips into O(N_books) round-trips. Over a
+// high-latency VPN (≥10 ms per round-trip) this reduces a multi-hour run to
+// under 60 seconds:
+//
+//   - BulkGetOrCreateChapters  — 2 round-trips per book   (~66 books = 132)
+//   - BulkGetOrCreateSections  — 2 round-trips per book   (~66 books = 132)
+//   - BulkUpsertChapterContents — 2-3 round-trips per book (~66 books = ~200)
+//   - BulkUpsertSectionContents — 2-3 round-trips per book (~66 books = ~200)
+//
+// Total: ~700 round-trips for the full two-language import, vs. ~93,000 with
+// the previous per-verse approach.
+//
 // Required environment variables:
 //
 //	DATABASE_URL         — PostgreSQL connection string
@@ -75,8 +90,8 @@ func main() {
 	//    The three UUID caches are allocated once here and shared across both
 	//    imports. During the ZH import they are populated with every structural
 	//    UUID (66 books, ~1,190 chapters, ~31,000 sections). During the EN import
-	//    every GetOrCreate* call finds its key already cached and skips the DB
-	//    round-trip, eliminating ~32,256 redundant SELECT statements.
+	//    every BulkGetOrCreate* call finds its key already cached and skips the
+	//    DB round-trip entirely, reducing EN structural overhead to zero.
 	sharedBookCache := make(map[int]uuid.UUID, maxBibleBooks)
 	sharedChapCache := make(map[chapterCacheKey]uuid.UUID, maxBibleChapters)
 	sharedSecCache := make(map[sectionCacheKey]uuid.UUID, maxBibleVerses)
@@ -140,14 +155,13 @@ const (
 )
 
 // importOutputFile reads a biblecom.OutputFile JSON from path and upserts all
-// content into the database.  lang must match the language code used in the
-// repository (biblecom.LangChinese or biblecom.LangEnglish).
+// content into the database using bulk operations.
 //
 // The three UUID caches are passed in from the caller (main) and shared across
 // both the ZH and EN imports. During the first (ZH) import they accumulate all
 // structural UUIDs (66 books, ~1,190 chapters, ~31,000 sections). During the
-// second (EN) import every GetOrCreate* call finds its key already in the cache
-// and skips the SELECT round-trip, eliminating ~32,256 redundant DB queries.
+// second (EN) import every BulkGetOrCreate* call finds its key already in the
+// cache and skips the structural DB round-trips entirely.
 func importOutputFile(
 	path, lang string,
 	repo *repository.BibleRepository,
@@ -229,7 +243,7 @@ func importOutputFile(
 	// Guard against silent total failure: if no verse content was written for a
 	// non-empty file, something is systematically wrong (wrong file, DB error on
 	// every verse). Use stats.verses as the indicator because verse content writes
-	// always happen regardless of cache hits (UpsertSectionContentFull is never
+	// always happen regardless of cache hits (BulkUpsertSectionContents is never
 	// skipped). stats.books/chapters may be 0 during the EN import when all
 	// structural rows hit the shared cache — that is expected and correct.
 	if stats.verses == 0 && len(out.Books) > 0 {
@@ -241,9 +255,18 @@ func importOutputFile(
 	return stats, nil
 }
 
-// importBook upserts a single BookOutput and all its chapters and verses.
-// The book UUID is fetched from bookCache on the first encounter and reused
-// for all subsequent chapters in the same book.
+// importBook upserts a single BookOutput and all its chapters and verses using
+// bulk operations. The algorithm per book is:
+//
+//  1. GetOrCreateBook  (single row — cached on EN pass)
+//  2. BulkGetOrCreateChapters (one INSERT + one SELECT for the whole book)
+//  3. BulkGetOrCreateSections (one INSERT + one SELECT for all verses in the book)
+//  4. UpsertBookContent        (single content row — per-language write)
+//  5. BulkUpsertChapterContents (one SELECT + one INSERT for all chapter titles)
+//  6. BulkUpsertSectionContents (one SELECT + one INSERT for all verse content)
+//
+// Total DB round-trips per book: ~8 (vs. 2×N_verses with the old per-verse
+// approach). For Genesis (~1,500 verses) this is a 375× reduction.
 func importBook(
 	repo *repository.BibleRepository,
 	book biblecom.BookOutput,
@@ -253,7 +276,7 @@ func importBook(
 	secCache map[sectionCacheKey]uuid.UUID,
 	stats *importStats,
 ) error {
-	// Resolve or create the book structural row.
+	// ── Step 1: Resolve book structural row (always cached after ZH pass) ──
 	bookID, ok := bookCache[book.BookSort]
 	if !ok {
 		var err error
@@ -264,130 +287,105 @@ func importBook(
 		bookCache[book.BookSort] = bookID
 	}
 
-	// Upsert the localised book title. stats.books is incremented only after
-	// the content write succeeds so that all three counters (books, chapters,
-	// verses) uniformly mean "structural row resolved AND content row written".
-	// A book whose content write fails is counted in stats.skipped only, never
-	// in stats.books — consistent with how importVerse counts stats.verses.
+	// ── Step 2: Bulk-resolve chapter structural rows ────────────────────────
+	// Single pass: cache hits go directly into chapSortToID; misses are
+	// collected for BulkGetOrCreateChapters (eliminates a redundant second
+	// iteration over book.Chapters compared to the two-pass approach).
+	missingChapSorts := make([]int, 0, len(book.Chapters))
+	chapSortToID := make(map[int]uuid.UUID, len(book.Chapters))
+	for _, chap := range book.Chapters {
+		ck := chapterCacheKey{bookSort: book.BookSort, chapSort: chap.ChapterSort}
+		if id, ok := chapCache[ck]; ok {
+			chapSortToID[chap.ChapterSort] = id
+		} else {
+			missingChapSorts = append(missingChapSorts, chap.ChapterSort)
+		}
+	}
+	if len(missingChapSorts) > 0 {
+		fetched, err := repo.BulkGetOrCreateChapters(bookID, missingChapSorts)
+		if err != nil {
+			return fmt.Errorf("BulkGetOrCreateChapters(book=%d): %w", book.BookSort, err)
+		}
+		for sort, id := range fetched {
+			chapCache[chapterCacheKey{bookSort: book.BookSort, chapSort: sort}] = id
+			chapSortToID[sort] = id
+		}
+	}
+
+	// ── Step 3: Bulk-resolve section structural rows ────────────────────────
+	missingVerseKeys := make([]repository.VerseKey, 0, len(book.Chapters)*30)
+	for _, chap := range book.Chapters {
+		for _, verse := range chap.Verses {
+			sk := sectionCacheKey{bookSort: book.BookSort, chapSort: chap.ChapterSort, verseSort: verse.VerseSort}
+			if _, ok := secCache[sk]; !ok {
+				missingVerseKeys = append(missingVerseKeys, repository.VerseKey{
+					ChapSort:  chap.ChapterSort,
+					VerseSort: verse.VerseSort,
+				})
+			}
+		}
+	}
+	if len(missingVerseKeys) > 0 {
+		verseKeyToID, err := repo.BulkGetOrCreateSections(bookID, chapSortToID, missingVerseKeys)
+		if err != nil {
+			return fmt.Errorf("BulkGetOrCreateSections(book=%d): %w", book.BookSort, err)
+		}
+		for vk, id := range verseKeyToID {
+			sk := sectionCacheKey{bookSort: book.BookSort, chapSort: vk.ChapSort, verseSort: vk.VerseSort}
+			secCache[sk] = id
+		}
+	}
+
+	// ── Step 4: Upsert localised book title ─────────────────────────────────
 	if err := repo.UpsertBookContent(bookID, lang, book.BookName); err != nil {
 		return fmt.Errorf("UpsertBookContent(sort=%d lang=%s): %w", book.BookSort, lang, err)
 	}
-	// stats.books is incremented unconditionally (cache hit or miss) so that the
-	// summary reflects "books processed" — during the EN import all books are
-	// already in bookCache from ZH, so the INSERT is skipped but the book was
-	// still fully handled.
 	stats.books++
 
+	// ── Steps 5 & 6: Bulk-upsert chapter and section content ────────────────
+	// Collect all content records for this book in a single pass so that both
+	// bulk calls can be issued in one batch per book.
+	chapContentRecs := make([]repository.ChapterContentRecord, 0, len(book.Chapters))
+	secContentRecs := make([]repository.SectionContentRecord, 0, len(book.Chapters)*30)
+
 	for _, chap := range book.Chapters {
-		if err := importChapter(repo, book.BookSort, bookID, chap, lang, chapCache, secCache, stats); err != nil {
-			log.Printf("[biblecom-importer] WARN book_sort=%d chap=%d (%s): %v",
-				book.BookSort, chap.ChapterSort, lang, err)
-			stats.skipped++
+		chapID := chapSortToID[chap.ChapterSort]
+		chapTitle := youversion.FormatChapterTitle(lang, chap.ChapterSort)
+		chapContentRecs = append(chapContentRecs, repository.ChapterContentRecord{
+			ChapterID: chapID,
+			Lang:      lang,
+			Title:     chapTitle,
+		})
+
+		for _, verse := range chap.Verses {
+			sk := sectionCacheKey{bookSort: book.BookSort, chapSort: chap.ChapterSort, verseSort: verse.VerseSort}
+			secID := secCache[sk]
+			verseTitle := youversion.FormatVerseTitle(lang, verse.VerseSort)
+			secContentRecs = append(secContentRecs, repository.SectionContentRecord{
+				SectionID: secID,
+				Lang:      lang,
+				Title:     verseTitle,
+				Content:   verse.Content,
+				SubTitle:  verse.SubTitle,
+			})
 		}
 	}
-	return nil
-}
 
-// importChapter upserts one ChapterOutput and all its verses.
-func importChapter(
-	repo *repository.BibleRepository,
-	bookSort int,
-	bookID uuid.UUID,
-	chap biblecom.ChapterOutput,
-	lang string,
-	chapCache map[chapterCacheKey]uuid.UUID,
-	secCache map[sectionCacheKey]uuid.UUID,
-	stats *importStats,
-) error {
-	ck := chapterCacheKey{bookSort: bookSort, chapSort: chap.ChapterSort}
-	chapID, ok := chapCache[ck]
-	if !ok {
-		var err error
-		chapID, err = repo.GetOrCreateChapter(bookID, chap.ChapterSort)
-		if err != nil {
-			return fmt.Errorf("GetOrCreateChapter(sort=%d): %w", chap.ChapterSort, err)
-		}
-		chapCache[ck] = chapID
+	if err := repo.BulkUpsertChapterContents(chapContentRecs); err != nil {
+		return fmt.Errorf("BulkUpsertChapterContents(book=%d lang=%s): %w", book.BookSort, lang, err)
 	}
+	stats.chapters += len(chapContentRecs)
 
-	// Synthesise a localised chapter title using the same template as the
-	// YouVersion importer so that both importers produce identical title rows.
-	// stats.chapters is incremented only after the content write succeeds,
-	// mirroring the stats.books and stats.verses semantics.
-	chapterTitle := youversion.FormatChapterTitle(lang, chap.ChapterSort)
-	if err := repo.UpsertChapterContent(chapID, lang, chapterTitle); err != nil {
-		return fmt.Errorf("UpsertChapterContent(sort=%d lang=%s): %w", chap.ChapterSort, lang, err)
+	if err := repo.BulkUpsertSectionContents(secContentRecs); err != nil {
+		return fmt.Errorf("BulkUpsertSectionContents(book=%d lang=%s): %w", book.BookSort, lang, err)
 	}
-	// Incremented unconditionally (cache hit or miss) — see importBook comment.
-	stats.chapters++
-
-	for _, verse := range chap.Verses {
-		if err := importVerse(repo, bookSort, bookID, chap.ChapterSort, chapID, verse, lang, secCache, stats); err != nil {
-			log.Printf("[biblecom-importer] WARN book=%d chap=%d verse=%d (%s): %v",
-				bookSort, chap.ChapterSort, verse.VerseSort, lang, err)
-			stats.skipped++
-		}
-	}
-	return nil
-}
-
-// importVerse upserts a single VerseOutput into the database.
-//
-// The Note field is intentionally ignored during import:
-//   - "merged"          — secondary verse in a merged group; "併於上節。" content stored as-is.
-//   - "ref:BOOK.CHAP.V" — bracket-labeled verse resolved via cross-reference; actual verse
-//                         content from the referenced verse is stored (resolved before import).
-//   - "omitted"         — bracket-labeled verse with no resolvable cross-reference; note body
-//                         text (e.g. "Some manuscripts include verse 44.") is stored as content.
-//
-// The CrossRef field is never written to the database; it exists only in the JSON
-// output for audit and traceability purposes.
-//
-// SubTitle is written to bible_section_contents.sub_title via
-// UpsertSectionContentFull; it is left empty for verses that do not begin a
-// new pericope section.
-func importVerse(
-	repo *repository.BibleRepository,
-	bookSort int,
-	bookID uuid.UUID,
-	chapSort int,
-	chapID uuid.UUID,
-	verse biblecom.VerseOutput,
-	lang string,
-	secCache map[sectionCacheKey]uuid.UUID,
-	stats *importStats,
-) error {
-	// secCache gates only the structural GetOrCreateSection round-trip (the
-	// bible_section row). It does NOT skip the UpsertSectionContentFull call
-	// below, because content rows are language-specific: the same section UUID
-	// must be written once for "chinese" and once for "english". The cache
-	// eliminates the redundant SELECT when both language files share a section.
-	sk := sectionCacheKey{bookSort: bookSort, chapSort: chapSort, verseSort: verse.VerseSort}
-	secID, ok := secCache[sk]
-	if !ok {
-		var err error
-		secID, err = repo.GetOrCreateSection(bookID, chapID, verse.VerseSort)
-		if err != nil {
-			return fmt.Errorf("GetOrCreateSection(verse=%d): %w", verse.VerseSort, err)
-		}
-		secCache[sk] = secID
-	}
-
-	// verseTitle mirrors the format stored by the springbible HTML crawler.
-	verseTitle := youversion.FormatVerseTitle(lang, verse.VerseSort)
-
-	// UpsertSectionContentFull persists both the verse text and the optional
-	// sub_title (pericope heading). The Note field is deliberately excluded
-	// from the DB — it is a JSON-only audit annotation.
-	if err := repo.UpsertSectionContentFull(secID, lang, verseTitle, verse.Content, verse.SubTitle); err != nil {
-		return fmt.Errorf("UpsertSectionContentFull(verse=%d lang=%s): %w", verse.VerseSort, lang, err)
-	}
-
-	// Count every content-write attempt — including idempotent no-ops on
-	// re-runs — as a measure of total throughput, not net new rows inserted.
-	stats.verses++
-	if stats.verses%logProgressEvery == 0 {
+	prevVerses := stats.verses
+	stats.verses += len(secContentRecs)
+	// Threshold-crossing check: fires once per logProgressEvery boundary even
+	// when a single book adds hundreds of verses at once (modulo would miss it).
+	if stats.verses/logProgressEvery > prevVerses/logProgressEvery {
 		log.Printf("[biblecom-importer] %s: imported %d verses...", lang, stats.verses)
 	}
+
 	return nil
 }

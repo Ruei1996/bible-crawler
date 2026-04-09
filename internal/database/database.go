@@ -18,7 +18,11 @@ func Connect(cfg *config.Config) *sqlx.DB {
 		log.Fatalf("Failed to connect to database: %v", err)
 	}
 
-	// Connection pool settings
+	// Connection pool settings: 25 open + 25 idle connections is sufficient for
+	// the crawler's concurrency (CRAWLER_PARALLELISM default 5, YouVersion workers
+	// default 20) while leaving headroom for the PostgreSQL server's connection limit.
+	// Open = Idle keeps a warm pool: no connection is ever torn down and re-created
+	// between parallel chapter requests, avoiding TCP + TLS overhead on every verse.
 	db.SetMaxOpenConns(25)
 	db.SetMaxIdleConns(25)
 

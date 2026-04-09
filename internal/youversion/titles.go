@@ -1,3 +1,18 @@
+// Package youversion — titles.go
+//
+// titles.go centralises the localised title templates for chapter and verse
+// rows written to bibles.bible_chapter_contents and bibles.bible_section_contents.
+// Keeping the templates here (rather than inlining them in cmd/youversion-importer
+// or cmd/biblecom-importer) achieves two goals:
+//
+//  1. Both importers produce identical title strings, so a cross-importer query
+//     (e.g. joining YouVersion and biblecom rows by chapter sort) always succeeds.
+//  2. If the DB schema ever changes the expected title format, updating this file
+//     automatically fixes all callers at once.
+//
+// Note: these functions are also called by cmd/biblecom-importer, which imports
+// bible.com content — the shared templates guarantee consistent title formatting
+// across all three crawler pipelines.
 package youversion
 
 import "fmt"

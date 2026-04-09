@@ -232,6 +232,9 @@ func (s *BibleScraper) crawlChapters(books []BookMeta) {
 		if cc.lang == LangEnglish {
 			chapTitle = fmt.Sprintf("Chapter %d", cc.chapSort)
 		}
+		// These title templates are intentionally identical to FormatChapterTitle in
+		// internal/youversion/titles.go, so rows from both crawlers share the same
+		// chapter title format and can be joined by title text in downstream queries.
 		if err = s.Repo.UpsertChapterContent(chapID, cc.lang, chapTitle); err != nil {
 			log.Printf("DB error saving chapter content (chapID=%s lang=%s): %v",
 				chapID, cc.lang, err)
@@ -246,6 +249,11 @@ func (s *BibleScraper) crawlChapters(books []BookMeta) {
 
 		doc.Find("script, style, a").Remove()
 
+		// springbible.fhl.net renders each verse as an <li> element inside a single
+		// top-level <ol>. The <ol><li> structure is the sole verse container on the
+		// page; no other semantic HTML is used for individual verses.
+		// Removing script/style/a tags beforehand prevents their text content from
+		// being treated as verse prose during the subsequent .Text() calls.
 		foundVerses := 0
 		doc.Find("ol li").Each(func(i int, sel *goquery.Selection) {
 			verseNum := i + 1
@@ -352,6 +360,8 @@ func (s *BibleScraper) saveVerse(bookID, chapID uuid.UUID, verseNum int, lang, c
 		return fmt.Errorf("empty verse content")
 	}
 
+	// Verse title templates mirror FormatVerseTitle in internal/youversion/titles.go.
+	// Keeping both crawlers in sync ensures cross-pipeline title comparisons work.
 	verseTitle := fmt.Sprintf("第%d節", verseNum)
 	if lang == LangEnglish {
 		verseTitle = fmt.Sprintf("verse %d", verseNum)

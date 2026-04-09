@@ -51,6 +51,9 @@ type OrphanResult struct {
 
 // ── SQL constants ─────────────────────────────────────────────────────────────
 
+// sqlCreateBackupTable creates the temporary holding table for cross-schema
+// references. PRIMARY KEY on (source_table, source_id) prevents duplicates
+// on repeated Backup calls (idempotent via ON CONFLICT DO NOTHING on inserts).
 const sqlCreateBackupTable = `
 CREATE TABLE IF NOT EXISTS bibles._orphan_refs_backup (
 	source_table         varchar NOT NULL,
@@ -62,6 +65,8 @@ CREATE TABLE IF NOT EXISTS bibles._orphan_refs_backup (
 	PRIMARY KEY (source_table, source_id)
 )`
 
+// sqlInsertGeneralBibles snapshots activities.general_bibles rows that reference
+// bibles.bible_sections, recording the stable sort triple alongside the old UUID.
 const sqlInsertGeneralBibles = `
 INSERT INTO bibles._orphan_refs_backup
 SELECT
@@ -75,6 +80,8 @@ JOIN bibles.bible_books     bb ON bb.id = bs.bible_book_id
 JOIN bibles.bible_chapters  bc ON bc.id = bs.bible_chapter_id
 ON CONFLICT (source_table, source_id) DO NOTHING`
 
+// sqlInsertGeneralTemplateBibles snapshots activities.general_template_bibles rows
+// that reference bibles.bible_sections, recording the stable sort triple alongside the old UUID.
 const sqlInsertGeneralTemplateBibles = `
 INSERT INTO bibles._orphan_refs_backup
 SELECT
@@ -88,6 +95,8 @@ JOIN bibles.bible_books     bb ON bb.id = bs.bible_book_id
 JOIN bibles.bible_chapters  bc ON bc.id = bs.bible_chapter_id
 ON CONFLICT (source_table, source_id) DO NOTHING`
 
+// sqlInsertDevotionBibles snapshots devotions.devotion_bibles rows that reference
+// bibles.bible_sections, recording the stable sort triple alongside the old UUID.
 const sqlInsertDevotionBibles = `
 INSERT INTO bibles._orphan_refs_backup
 SELECT
@@ -101,6 +110,9 @@ JOIN bibles.bible_books     bb ON bb.id = bs.bible_book_id
 JOIN bibles.bible_chapters  bc ON bc.id = bs.bible_chapter_id
 ON CONFLICT (source_table, source_id) DO NOTHING`
 
+// sqlUpdateGeneralBibles resolves new bibles.bible_sections UUIDs by joining on
+// the stable (book_sort, chapter_sort, section_sort) triple and writes them back
+// to activities.general_bibles.bible_id.
 const sqlUpdateGeneralBibles = `
 UPDATE activities.general_bibles gb
 SET    bible_id = new_bs.id
@@ -113,6 +125,8 @@ JOIN   bibles.bible_sections new_bs ON new_bs.bible_book_id = new_bb.id
 WHERE  bkp.source_table = 'general_bibles'
   AND  gb.id = bkp.source_id`
 
+// sqlUpdateGeneralTemplateBibles resolves new bibles.bible_sections UUIDs by joining on
+// the stable sort triple and writes them back to activities.general_template_bibles.bible_id.
 const sqlUpdateGeneralTemplateBibles = `
 UPDATE activities.general_template_bibles gtb
 SET    bible_id = new_bs.id
@@ -125,6 +139,8 @@ JOIN   bibles.bible_sections new_bs ON new_bs.bible_book_id = new_bb.id
 WHERE  bkp.source_table = 'general_template_bibles'
   AND  gtb.id = bkp.source_id`
 
+// sqlUpdateDevotionBibles resolves new bibles.bible_sections UUIDs by joining on
+// the stable sort triple and writes them back to devotions.devotion_bibles.bible_section_id.
 const sqlUpdateDevotionBibles = `
 UPDATE devotions.devotion_bibles db
 SET    bible_section_id = new_bs.id

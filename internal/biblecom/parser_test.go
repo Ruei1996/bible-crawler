@@ -1067,3 +1067,188 @@ func TestResolveRefs(t *testing.T) {
 	mrk9 := out.Books[1].Chapters[0].Verses[0]
 	assert.Equal(t, "This kind can come out only by prayer.", mrk9.Content)
 }
+
+// TestParseChapter_ReferenceContainerExcludedFromSubTitle verifies that a
+// USFM \r parallel-passage reference container (class suffix "__r") is never
+// captured as sub_title, even though its inner span carries the "__heading"
+// class like genuine section headings.
+//
+// Regression test for GEN.11 (CUNP-上帝): the __r div "（代上1‧24－27）" that
+// follows the __s heading "閃的後代" was incorrectly overwriting pendingSub,
+// causing verse 10 to receive sub_title "（代上1‧24－27）" instead of "閃的後代".
+func TestParseChapter_ReferenceContainerExcludedFromSubTitle(t *testing.T) {
+	rawHTML := `<!DOCTYPE html><html><body>
+	<div data-testid="chapter-content">
+	  <div data-usfm="GEN.11">
+	    <div class="ChapterContent-module__cat7xG__s">
+	      <span class="ChapterContent-module__cat7xG__heading">閃的後代</span>
+	    </div>
+	    <div class="ChapterContent-module__cat7xG__r">
+	      <span class="ChapterContent-module__cat7xG__heading">（代上1‧24－27）</span>
+	    </div>
+	    <div class="ChapterContent-module__cat7xG__p">
+	      <span data-usfm="GEN.11.10" class="ChapterContent-module__cat7xG__verse">
+	        <span class="ChapterContent-module__cat7xG__label">10</span>
+	        <span class="ChapterContent-module__cat7xG__content">閃的後代記在下面。</span>
+	      </span>
+	    </div>
+	  </div>
+	</div>
+	</body></html>`
+
+	verses, err := ParseChapter(rawHTML, "GEN", 11)
+	require.NoError(t, err)
+	require.Len(t, verses, 1)
+
+	// The __s heading must be the sub_title; the __r reference must be ignored.
+	assert.Equal(t, "閃的後代", verses[0].SubTitle,
+		"__r reference container must not overwrite __s section heading as sub_title")
+}
+
+// TestParseChapter_MajorSectionHeadingWinsOverSubSection verifies that when
+// two consecutive heading divs appear before the same verse, the first
+// (higher-level) heading is attached as sub_title and the second is discarded.
+//
+// Regression test for PRO.22 (NIV): the __ms1 "Thirty Sayings of the Wise"
+// heading was being overwritten by the immediately-following __s2 "Saying 1"
+// heading, causing verse 17 to receive sub_title "Saying 1" instead of
+// "Thirty Sayings of the Wise".
+func TestParseChapter_MajorSectionHeadingWinsOverSubSection(t *testing.T) {
+	rawHTML := `<!DOCTYPE html><html><body>
+	<div data-testid="chapter-content">
+	  <div data-usfm="PRO.22">
+	    <div class="ChapterContent-module__cat7xG__ms1">
+	      <span class="ChapterContent-module__cat7xG__heading">Thirty Sayings of the Wise</span>
+	    </div>
+	    <div class="ChapterContent-module__cat7xG__s2">
+	      <span class="ChapterContent-module__cat7xG__heading">Saying 1</span>
+	    </div>
+	    <div class="ChapterContent-module__cat7xG__q1">
+	      <span data-usfm="PRO.22.17" class="ChapterContent-module__cat7xG__verse">
+	        <span class="ChapterContent-module__cat7xG__label">17</span>
+	        <span class="ChapterContent-module__cat7xG__content">Pay attention and turn your ear to the sayings of the wise;</span>
+	      </span>
+	    </div>
+	    <div class="ChapterContent-module__cat7xG__s2">
+	      <span class="ChapterContent-module__cat7xG__heading">Saying 2</span>
+	    </div>
+	    <div class="ChapterContent-module__cat7xG__q1">
+	      <span data-usfm="PRO.22.22" class="ChapterContent-module__cat7xG__verse">
+	        <span class="ChapterContent-module__cat7xG__label">22</span>
+	        <span class="ChapterContent-module__cat7xG__content">Do not exploit the poor because they are poor.</span>
+	      </span>
+	    </div>
+	  </div>
+	</div>
+	</body></html>`
+
+	verses, err := ParseChapter(rawHTML, "PRO", 22)
+	require.NoError(t, err)
+	require.Len(t, verses, 2)
+
+	// ms1 wins over the immediately-following s2 for verse 17.
+	assert.Equal(t, "Thirty Sayings of the Wise", verses[0].SubTitle,
+		"first (ms1) heading must win over the subsequent s2 heading")
+
+	// After pendingSub is consumed by verse 17 the standalone s2 "Saying 2"
+	// must attach correctly to the next verse.
+	assert.Equal(t, "Saying 2", verses[1].SubTitle,
+		"standalone s2 heading following a consumed pendingSub must attach normally")
+}
+
+// TestParseChapter_ClContainerStripsFootnote verifies that a __cl (chapter-
+// label) heading with an embedded __note footnote (as in PSA.119) is stored
+// with clean text only — no footnote body, no duplicated verse-number prefix.
+//
+// Before the fix, heading.Text() recursively included text from every nested
+// __heading span inside the __note subtree, producing garbage like:
+//   "Psalm 119119 This psalm is an acrostic poem…"
+// After the fix, collectText(heading.First()) skips __note children, giving:
+//   "Psalm 119"
+//
+// The immediately-following __qa "א Aleph" is level-3 (sub-section/acrostic)
+// and must be discarded (first-heading-wins within the same level band).
+func TestParseChapter_ClContainerStripsFootnote(t *testing.T) {
+	rawHTML := `<!DOCTYPE html><html><body>
+<div data-testid="chapter-content">
+  <div data-usfm="PSA.119">
+    <div class="ChapterContent-module__cat7xG__cl">
+      <span class="ChapterContent-module__cat7xG__heading">Psalm 119<span class="ChapterContent-module__cat7xG__note"><span class="ChapterContent-module__cat7xG__label">#</span><span class="ChapterContent-module__cat7xG__body"><span class="ChapterContent-module__cat7xG__fr"><span class="ChapterContent-module__cat7xG__heading">119 </span></span><span class="ft"><span class="ChapterContent-module__cat7xG__heading">This psalm is an acrostic poem, the stanzas of which begin with successive letters of the Hebrew alphabet; moreover, the verses of each stanza begin with the same letter of the Hebrew alphabet.</span></span></span></span></span>
+    </div>
+    <div class="ChapterContent-module__cat7xG__qa">
+      <span class="ChapterContent-module__cat7xG__heading">א Aleph</span>
+    </div>
+    <div class="ChapterContent-module__cat7xG__p">
+      <span data-usfm="PSA.119.1" class="ChapterContent-module__cat7xG__verse">
+        <span class="ChapterContent-module__cat7xG__label">1</span>
+        <span class="ChapterContent-module__cat7xG__content">Blessed are those whose ways are blameless, who walk according to the law of the Lord.</span>
+      </span>
+    </div>
+    <div class="ChapterContent-module__cat7xG__qa">
+      <span class="ChapterContent-module__cat7xG__heading">ב Beth</span>
+    </div>
+    <div class="ChapterContent-module__cat7xG__p">
+      <span data-usfm="PSA.119.9" class="ChapterContent-module__cat7xG__verse">
+        <span class="ChapterContent-module__cat7xG__label">9</span>
+        <span class="ChapterContent-module__cat7xG__content">How can a young person stay on the path of purity?</span>
+      </span>
+    </div>
+  </div>
+</div>
+</body></html>`
+
+	verses, err := ParseChapter(rawHTML, "PSA", 119)
+	require.NoError(t, err)
+	require.Len(t, verses, 2)
+
+	// Verse 1: sub_title from __cl, footnote stripped; __qa "א Aleph" discarded
+	// (level 3 after level-2 __cl → first-heading-wins).
+	assert.Equal(t, "Psalm 119", verses[0].SubTitle,
+		"__cl heading text must be extracted without the embedded __note footnote")
+	assert.Equal(t, "Blessed are those whose ways are blameless, who walk according to the law of the Lord.", verses[0].Content)
+
+	// Verse 9: __qa "ב Beth" is the only pending heading when pendingSub is empty.
+	assert.Equal(t, "ב Beth", verses[1].SubTitle,
+		"standalone __qa heading (after pendingSub cleared by verse 1) must attach normally")
+}
+
+// TestParseChapter_MajorAndSectionHeadingsMerged verifies that two consecutive
+// heading divs of different but coordinated levels (__ms1 + __s1) that both
+// precede the same verse are concatenated into a single sub_title, not
+// collapsed to first-heading-wins.
+//
+// Contrast with TestParseChapter_MajorSectionHeadingWinsOverSubSection
+// (__ms1 + __s2 → first wins): here the second heading is __s1 (level 2),
+// which is a coordinated section heading, not a subordinate sub-heading.
+// Both provide meaningful context for verse 8 and should be stored together.
+// (Real-world example: PRO.1 — "Prologue: Exhortations to Embrace Wisdom" +
+//  "Warning Against the Invitation of Sinful Men" before verse 8.)
+func TestParseChapter_MajorAndSectionHeadingsMerged(t *testing.T) {
+	rawHTML := `<!DOCTYPE html><html><body>
+<div data-testid="chapter-content">
+  <div data-usfm="PRO.1">
+    <div class="ChapterContent-module__cat7xG__ms1">
+      <span class="ChapterContent-module__cat7xG__heading">Prologue: Exhortations to Embrace Wisdom</span>
+    </div>
+    <div class="ChapterContent-module__cat7xG__s1">
+      <span class="ChapterContent-module__cat7xG__heading">Warning Against the Invitation of Sinful Men</span>
+    </div>
+    <div class="ChapterContent-module__cat7xG__q1">
+      <span data-usfm="PRO.1.8" class="ChapterContent-module__cat7xG__verse">
+        <span class="ChapterContent-module__cat7xG__label">8</span>
+        <span class="ChapterContent-module__cat7xG__content">Listen, my son, to your father's instruction and do not forsake your mother's teaching.</span>
+      </span>
+    </div>
+  </div>
+</div>
+</body></html>`
+
+	verses, err := ParseChapter(rawHTML, "PRO", 1)
+	require.NoError(t, err)
+	require.Len(t, verses, 1)
+
+	// Both the ms1 and s1 headings must be joined with a newline separator.
+	want := "Prologue: Exhortations to Embrace Wisdom\nWarning Against the Invitation of Sinful Men"
+	assert.Equal(t, want, verses[0].SubTitle,
+		"ms1 + s1 headings before the same verse must be concatenated into sub_title")
+}

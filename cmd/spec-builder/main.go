@@ -141,6 +141,11 @@ var bibleChapterCounts = []int{
 var globalChapStarts []int
 
 func init() {
+	// Pre-compute global chapter start indices once at package init.
+	// globalChapStarts[i] = sum of all chapter counts for books 0..i-1, plus 1.
+	// E.g. Genesis (50 chapters) → starts at 1; Exodus (40 chapters) → starts at 51.
+	// These 1-based global indices map directly to the "chap=" URL parameter on
+	// springbible.fhl.net.
 	globalChapStarts = make([]int, len(defaultBookMeta))
 	offset := 1
 	for i, count := range bibleChapterCounts {

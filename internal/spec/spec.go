@@ -43,7 +43,10 @@ type BookSpec struct {
 }
 
 // VerseCount returns the number of verses in the given 1-based chapter.
-// Results are cached after the first call.
+// Results are cached after the first call; subsequent calls for the same
+// book return immediately from the pre-built slice without re-parsing the map.
+// Thread-safety: not goroutine-safe. Each BookSpec is accessed from a single
+// goroutine during setup (Phase 1) and read-only thereafter.
 func (b *BookSpec) VerseCount(chapter int) (int, error) {
 	if b.verseCounts == nil {
 		if err := b.buildVerseCounts(); err != nil {
