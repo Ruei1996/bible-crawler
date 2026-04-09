@@ -1252,3 +1252,108 @@ func TestParseChapter_MajorAndSectionHeadingsMerged(t *testing.T) {
 	assert.Equal(t, want, verses[0].SubTitle,
 		"ms1 + s1 headings before the same verse must be concatenated into sub_title")
 }
+
+// TestParseChapter_NdSpanMergedIntoHeading verifies that a USFM \nd (Name of
+// Deity) span wrapping part of a heading is included in the sub_title.
+//
+// bible.com renders the divine name "Lord" inside a nested __nd span that
+// itself contains a __heading span. Prior to the fix, collectText was called
+// only on the first __heading span, missing text in sibling __nd branches:
+//
+//   <div class="__s1">
+//     <span class="__heading">Moses and the Glory of the </span>  ← first __heading
+//     <span class="__nd">
+//       <span class="__heading">Lord</span>                       ← missed by old code
+//     </span>
+//   </div>
+//
+// The fix collects text from the container div so all sibling branches are
+// visited, while __note subtrees are still pruned.  This resolves truncated
+// sub_titles like "The" (→ "The Lord's Covenant With Abram") and
+// "Moses and the Glory of the " (→ "Moses and the Glory of the Lord").
+func TestParseChapter_NdSpanMergedIntoHeading(t *testing.T) {
+rawHTML := `<!DOCTYPE html><html><body>
+<div data-testid="chapter-content">
+  <div data-usfm="EXO.33">
+    <div class="ChapterContent-module__cat7xG__s1"><span class="ChapterContent-module__cat7xG__heading">Moses and the Glory of the </span><span class="ChapterContent-module__cat7xG__nd"><span class="ChapterContent-module__cat7xG__heading">Lord</span></span></div>
+    <div class="ChapterContent-module__cat7xG__p">
+      <span data-usfm="EXO.33.12" class="ChapterContent-module__cat7xG__verse">
+        <span class="ChapterContent-module__cat7xG__label">12</span>
+        <span class="ChapterContent-module__cat7xG__content">Moses said to the Lord, You have been telling me.</span>
+      </span>
+    </div>
+  </div>
+</div>
+</body></html>`
+
+verses, err := ParseChapter(rawHTML, "EXO", 33)
+require.NoError(t, err)
+require.Len(t, verses, 1)
+
+assert.Equal(t, "Moses and the Glory of the Lord", verses[0].SubTitle,
+"__nd > __heading text must be included in the sub_title (not truncated at the first __heading span)")
+}
+
+// TestParseChapter_NdSpanWithTrailingText verifies that a heading whose "Lord"
+// is wrapped in __nd and is followed by more __heading text (e.g. "'s Covenant
+// With Abram") is fully assembled — covering the "The Lord's ..." pattern.
+//
+// The span elements are written without whitespace between them, matching the
+// minified HTML that bible.com actually delivers (no whitespace text nodes
+// between inline sibling spans).
+func TestParseChapter_NdSpanWithTrailingText(t *testing.T) {
+rawHTML := `<!DOCTYPE html><html><body>
+<div data-testid="chapter-content">
+  <div data-usfm="GEN.15">
+    <div class="ChapterContent-module__cat7xG__s1"><span class="ChapterContent-module__cat7xG__heading">The </span><span class="ChapterContent-module__cat7xG__nd"><span class="ChapterContent-module__cat7xG__heading">Lord</span></span><span class="ChapterContent-module__cat7xG__heading">'s Covenant With Abram</span></div>
+    <div class="ChapterContent-module__cat7xG__p">
+      <span data-usfm="GEN.15.1" class="ChapterContent-module__cat7xG__verse">
+        <span class="ChapterContent-module__cat7xG__label">1</span>
+        <span class="ChapterContent-module__cat7xG__content">After this, the word of the Lord came to Abram in a vision.</span>
+      </span>
+    </div>
+  </div>
+</div>
+</body></html>`
+
+verses, err := ParseChapter(rawHTML, "GEN", 15)
+require.NoError(t, err)
+require.Len(t, verses, 1)
+
+assert.Equal(t, "The Lord's Covenant With Abram", verses[0].SubTitle,
+"heading fragments split across __heading and __nd > __heading spans must be joined")
+}
+
+// TestParseChapter_NdSpanDoesNotBreakNoteExclusion verifies that the
+// container-div collection strategy still prunes __note subtrees correctly.
+// The PSA.119 regression (__cl container with an embedded __note footnote
+// that contains its own __heading span) must continue to work after the
+// __nd fix — the footnote body must not bleed into the sub_title.
+func TestParseChapter_NdSpanDoesNotBreakNoteExclusion(t *testing.T) {
+rawHTML := `<!DOCTYPE html><html><body>
+<div data-testid="chapter-content">
+  <div data-usfm="PSA.119">
+    <div class="ChapterContent-module__cat7xG__cl">
+      <span class="ChapterContent-module__cat7xG__heading">Psalm 119</span>
+      <span class="ChapterContent-module__cat7xG__note">
+        <span class="ChapterContent-module__cat7xG__fr">119 </span>
+        <span class="ChapterContent-module__cat7xG__heading">This psalm is an acrostic poem.</span>
+      </span>
+    </div>
+    <div class="ChapterContent-module__cat7xG__p">
+      <span data-usfm="PSA.119.1" class="ChapterContent-module__cat7xG__verse">
+        <span class="ChapterContent-module__cat7xG__label">1</span>
+        <span class="ChapterContent-module__cat7xG__content">Blessed are those whose ways are blameless.</span>
+      </span>
+    </div>
+  </div>
+</div>
+</body></html>`
+
+verses, err := ParseChapter(rawHTML, "PSA", 119)
+require.NoError(t, err)
+require.Len(t, verses, 1)
+
+assert.Equal(t, "Psalm 119", verses[0].SubTitle,
+"__note subtree inside __cl container must still be pruned after __nd fix")
+}

@@ -227,17 +227,32 @@ func ParseChapter(rawHTML string, bookUSFM string, chapNum int) ([]VerseOutput, 
 				return
 			}
 
-			// Extract heading text from only the first (outermost) __heading
-			// span and walk its node tree with collectText, which skips __note
-			// and __label subtrees. Using heading.Text() is incorrect because:
-			//  (a) it concatenates text from ALL matched spans (outer + nested),
-			//      doubling text when __note itself contains __heading children
-			//      (e.g. PSA.119 __cl footnote produces "Psalm 119119 This psalm…");
-			//  (b) it includes footnote body text that should never appear in
-			//      a section heading.
+			// Extract heading text by walking the entire container div with
+			// collectText, which skips __note and __label subtrees.
+			//
+			// We intentionally collect from the container div (child) rather
+			// than from heading.First() (the first __heading span only). Some
+			// headings contain a USFM \nd (Name of Deity) span that wraps
+			// "Lord" between heading text fragments, e.g.:
+			//
+			//   <div class="__s1">
+			//     <span class="__heading">Moses and the Glory of the </span>
+			//     <span class="__nd">
+			//       <span class="__heading">Lord</span>
+			//     </span>
+			//   </div>
+			//
+			// The first __heading span alone produces "Moses and the Glory of
+			// the "; only walking the container div produces the full
+			// "Moses and the Glory of the Lord".
+			//
+			// collectText already skips __note subtrees so the PSA.119 footnote
+			// bug (where __cl contained a __note > __heading footnote body) is
+			// still handled correctly — the __note branch is pruned before any
+			// of its text is collected.
 			var hsb strings.Builder
-			if hFirst := heading.First(); hFirst.Length() > 0 && len(hFirst.Nodes) > 0 {
-				collectText(hFirst.Nodes[0], &hsb, 0)
+			if len(child.Nodes) > 0 {
+				collectText(child.Nodes[0], &hsb, 0)
 			}
 			headingText := normaliseSpace(hsb.String())
 			if headingText == "" {
