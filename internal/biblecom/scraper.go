@@ -54,6 +54,13 @@ const (
 	// if bible.com ever returns an unexpectedly large page.
 	maxResponseBytes = 10 * 1024 * 1024
 
+	// disputedVerseSuffix is the canonical suffix appended to every note that
+	// marks a textually-disputed (bracket) verse whose content is intentionally
+	// stored as an empty string. It is used as a structural signal in
+	// syncDisputedVersesZH to identify disputed EN verses without a fragile
+	// full-string match on localised book/chapter text.
+	disputedVerseSuffix = ",遇到特殊情境，爬蟲實作邏輯在此處留下空字串"
+
 	// userAgent is sent with every request so bible.com can identify the crawler
 	// in its access logs. A real browser UA avoids triggering bot-detection rules
 	// that target the default Go http client user agent string.
@@ -99,6 +106,16 @@ type chapterResult struct {
 // The HTTP client reuses connections and honours the configured timeout.
 // The rate limiter is initialised with a burst of 1 so the first request is
 // also subject to the configured RPS limit (avoids an initial burst spike).
+//
+// Parameters:
+//   - cfg:       application config; all BIBLECOM_* fields are consumed here.
+//     BibleComWorkers sets the goroutine pool size; BibleComRateLimitRPS
+//     controls the token-bucket ceiling shared across all workers.
+//   - bibleSpec: ordered []*spec.BookSpec from spec.Load — drives chapter-count
+//     iteration. Must satisfy len(bibleSpec) == len(Books) (checked by LoadSpec).
+//
+// Returns:
+//   - *BibleComScraper fully initialised and ready to call Run.
 func NewBibleComScraper(cfg *config.Config, bibleSpec []*spec.BookSpec) *BibleComScraper {
 	// idlePoolSize must be at least as large as the worker count so that every
 	// worker can hold an idle connection open between rate-limiter waits.
@@ -153,6 +170,17 @@ func NewBibleComScraper(cfg *config.Config, bibleSpec []*spec.BookSpec) *BibleCo
 // signal.NotifyContext in main) so that Ctrl-C triggers a graceful shutdown:
 // workers finish their current HTTP request before exiting, and a partial
 // OutputFile is returned with whatever was collected so far.
+//
+// Parameters:
+//   - ctx: controls the lifetime of all worker goroutines. Cancelling it causes
+//     workers to stop after their current in-flight HTTP request completes,
+//     then return partial results rather than blocking indefinitely.
+//
+// Returns:
+//   - *OutputFile: Chinese (CUNP-上帝) result; may be partial if ctx was cancelled.
+//   - *OutputFile: English (NIV) result; same partial-result guarantee.
+//   - error: currently always nil; reserved for future fatal-error promotion
+//     (e.g. if a minimum-chapter threshold is introduced).
 func (s *BibleComScraper) Run(ctx context.Context) (*OutputFile, *OutputFile, error) {
 	// Pre-allocate the result grid: [bookIdx][chapIdx] = chapterResult.
 	// Each cell is written by exactly one goroutine (no races on the cells
@@ -217,13 +245,18 @@ func (s *BibleComScraper) Run(ctx context.Context) (*OutputFile, *OutputFile, er
 	zhOut := s.assembleOutput(zhGrid, LangChinese, "CUNP-上帝", zhVersionID)
 	enOut := s.assembleOutput(enGrid, LangEnglish, "NIV", enVersionID)
 
-	// resolveRefs fills in the Content for bracket verses that carry a
-	// cross-reference (CrossRef != "").  It runs after all books have been
-	// assembled in memory, so it can look up any verse by its USFM key
-	// regardless of book order.  Chinese CUNP includes all verses, so the
-	// pass is effectively a no-op for zhOut.
-	resolveRefs(zhOut)
-	resolveRefs(enOut)
+	// Bracket (disputed) verses are handled in processItem, which writes ""
+	// as content and a human-readable note. resolveRefs — the cross-reference
+	// resolution pass that would fill in prose from a target verse — is
+	// intentionally not used: we want empty content, not resolved prose.
+
+	// syncDisputedVersesZH ensures the Chinese output contains a placeholder
+	// entry (content="", human-readable note) for every disputed verse that
+	// the English output captured via bracket-label detection. The Chinese
+	// CUNP source on bible.com silently skips disputed verse numbers, so the
+	// parser produces no entry — without this sync, re-running the crawler
+	// would overwrite the JSON and lose those placeholder rows.
+	syncDisputedVersesZH(zhOut, enOut)
 
 	return zhOut, enOut, nil
 }
@@ -355,6 +388,13 @@ func (s *BibleComScraper) processItem(
 			usfm, item.chapSort, item.lang, err)
 		return
 	}
+
+	bookEntry := Books[item.bookIdx]
+	bookName := bookEntry.NameZH
+	if item.lang == LangEnglish {
+		bookName = bookEntry.NameEN
+	}
+	applyDisputedPostProcessing(verses, item.lang, bookName, item.chapSort)
 
 	result := chapterResult{verses: verses}
 	if item.lang == LangChinese {
@@ -515,80 +555,9 @@ func (s *BibleComScraper) assembleOutput(
 	return out
 }
 
-// resolveRefs fills in the Content field for bracket verses that reference
-// another verse via CrossRef (e.g. "MRK.9.29" for NIV Matthew 17:21).
-//
-// It performs two passes over out.Books:
-//  1. Build an in-memory lookup index: "BOOK.CHAP.VERSE" → verse content.
-//  2. For each verse with CrossRef set, look up the referenced content and
-//     assign it to the verse's Content field.
-//
-// This design avoids extra HTTP requests: all verse content is already in
-// memory after assembleOutput, and the lookup is O(1) per cross-reference.
-//
-// If a cross-referenced verse is not found (e.g. the target chapter failed
-// to fetch), a warning is logged and a bracketed placeholder "[See USFM]" is
-// stored so the DB import never receives an empty content value.
-//
-// Chinese CUNP output has no bracket verses, so this function is a no-op for
-// that language.
-func resolveRefs(out *OutputFile) {
-	// Pass 1: build "BOOK.CHAP.VERSE" → content lookup.
-	// Pre-size the map with a generous estimate to avoid repeated rehashing.
-	index := make(map[string]string, len(out.Books)*50)
-	for _, book := range out.Books {
-		for _, chap := range book.Chapters {
-			for _, verse := range chap.Verses {
-				key := fmt.Sprintf("%s.%d.%d", book.BookUSFM, chap.ChapterSort, verse.VerseSort)
-				index[key] = verse.Content
-			}
-		}
-	}
-
-	// Pass 2: resolve cross-references in place.
-	resolved, warned := 0, 0
-	for bi := range out.Books {
-		for ci := range out.Books[bi].Chapters {
-			for vi := range out.Books[bi].Chapters[ci].Verses {
-				v := &out.Books[bi].Chapters[ci].Verses[vi]
-				if v.CrossRef == "" {
-					continue
-				}
-				target, ok := index[v.CrossRef]
-				// Treat a missing key, an empty target, or a merged-verse sentinel
-				// ("併於上節。") as unresolvable — the merged sentinel is non-empty
-				// and would otherwise pass the TrimSpace guard, silently writing
-				// Chinese text into an English bracket verse.
-				if !ok || strings.TrimSpace(target) == "" || target == mergedVerseContent {
-					log.Printf("[biblecom] WARN: cross-ref %q not resolved for %s ch%d v%d — "+
-						"the target chapter may have failed to fetch",
-						v.CrossRef,
-						out.Books[bi].BookUSFM,
-						out.Books[bi].Chapters[ci].ChapterSort,
-						v.VerseSort)
-					// Placeholder keeps DB content non-empty.
-					v.Content = fmt.Sprintf("[See %s]", v.CrossRef)
-					warned++
-					continue
-				}
-				v.Content = target
-				resolved++
-			}
-		}
-	}
-	if resolved > 0 {
-		log.Printf("[biblecom] resolved %d cross-reference verse(s) in %s output",
-			resolved, out.Language)
-	}
-	if warned > 0 {
-		log.Printf("[biblecom] WARN: %d cross-reference(s) in %s output could not be resolved",
-			warned, out.Language)
-	}
-}
-
 // WriteOutputFiles serialises the two OutputFile values to the configured
-// JSON output paths. Files are created with mode 0644 (world-readable). Both
-// files are written before returning; if the second write fails, the first
+// JSON output paths. Files are created with mode 0640 (owner rw, group r).
+// Both files are written before returning; if the second write fails, the first
 // file is still preserved so the crawl work is not lost.
 func WriteOutputFiles(zhOut, enOut *OutputFile, zhPath, enPath string) error {
 	if err := writeJSON(zhPath, zhOut); err != nil {
@@ -676,7 +645,9 @@ func writeJSON(path string, v any) error {
 		_ = tmp.Close()
 		return fmt.Errorf("write temp file: %w", err)
 	}
-	if err := tmp.Chmod(0o644); err != nil {
+	// 0640: owner read/write, group read — restricts world access on shared hosts
+	// since JSON output may contain content from licensed Bible translations (CWE-732).
+	if err := tmp.Chmod(0o640); err != nil {
 		_ = tmp.Close()
 		return fmt.Errorf("chmod temp file: %w", err)
 	}
@@ -719,4 +690,149 @@ func countTotalChapters(books []*spec.BookSpec) int {
 		total += b.TotalChapters
 	}
 	return total
+}
+
+// disputedNote returns a human-readable JSON annotation for a textually-
+// disputed verse that the crawler intentionally stores as an empty string.
+// The note embeds the book name, chapter, and verse so that a reader of the
+// JSON output can immediately identify the affected verse without cross-
+// referencing additional files.
+//
+// Chinese format: "馬太福音,第18章,第11小節,遇到特殊情境，爬蟲實作邏輯在此處留下空字串"
+// English format: "Matthew,chapter 17,verse 21,遇到特殊情境，爬蟲實作邏輯在此處留下空字串"
+func disputedNote(lang, bookName string, chapSort, verseSort int) string {
+	if lang == LangChinese {
+		return fmt.Sprintf("%s,第%d章,第%d小節%s", bookName, chapSort, verseSort, disputedVerseSuffix)
+	}
+	return fmt.Sprintf("%s,chapter %d,verse %d%s", bookName, chapSort, verseSort, disputedVerseSuffix)
+}
+
+// applyDisputedPostProcessing blanks out any bracket (disputed) verses in the
+// provided slice and replaces their technical parser note ("ref:*" or "omitted")
+// with a human-readable annotation produced by disputedNote.
+//
+// Rules:
+//   - Note starts with "ref:" (cross-ref bracket verse) → clear Content & CrossRef, set Note.
+//   - Note == "omitted" (no-cross-ref bracket verse) → clear Content, set Note.
+//   - Note == "merged" → untouched (merged-verse content is valid prose).
+//   - Note == "" → untouched (normal verse).
+//
+// The function mutates verses in place and is idempotent.
+func applyDisputedPostProcessing(verses []VerseOutput, lang, bookName string, chapSort int) {
+	for i := range verses {
+		if !strings.HasPrefix(verses[i].Note, "ref:") && verses[i].Note != "omitted" {
+			continue
+		}
+		verses[i].Content = ""
+		// For "ref:*" verses, CrossRef was set by the parser — clear it so
+		// the JSON output does not expose the internal cross-reference USFM.
+		// For "omitted" verses, CrossRef is already "" (the parser never sets
+		// it when omitted=true and refUSFM=""); the assignment is explicit for
+		// clarity and defensive consistency across both branches.
+		verses[i].CrossRef = ""
+		verses[i].Note = disputedNote(lang, bookName, chapSort, verses[i].VerseSort)
+	}
+}
+
+// syncDisputedVersesZH ensures the Chinese output contains a placeholder entry
+// (content="", human-readable Chinese note) for every verse that the English
+// output flagged as textually-disputed (its Note contains "遇到特殊情境").
+//
+// The Chinese CUNP source on bible.com silently skips disputed verse numbers
+// without any bracket label, so ParseChapter produces no entry for them.
+// This function bridges that gap by cross-referencing the EN output, inserting
+// a correctly-sorted VerseOutput into the matching ZH chapter whenever the ZH
+// chapter is missing that verse. The content is always "" and the note format
+// follows the Chinese convention ("書名,第N章,第N小節,遇到特殊情境…").
+//
+// Must be called after both assembleOutput passes complete and after the EN
+// post-processing in processItem has already set disputed verse notes.
+func syncDisputedVersesZH(zhOut, enOut *OutputFile) {
+	// Build a pointer index: USFM + chapSort → *ChapterOutput inside zhOut.
+	// Using pointers means mutations to Verses are visible via zhOut directly.
+	type chapKey struct {
+		usfm string
+		chap int
+	}
+	zhChapIdx := make(map[chapKey]*ChapterOutput)
+	// Build a per-chapter verse-sort set so duplicate-checks are O(1) instead
+	// of O(V_ch) linear scan. Keyed identically to zhChapIdx.
+	zhChapVerses := make(map[chapKey]map[int]struct{})
+	for bi := range zhOut.Books {
+		for ci := range zhOut.Books[bi].Chapters {
+			key := chapKey{zhOut.Books[bi].BookUSFM, zhOut.Books[bi].Chapters[ci].ChapterSort}
+			zhChapIdx[key] = &zhOut.Books[bi].Chapters[ci]
+			vset := make(map[int]struct{}, len(zhOut.Books[bi].Chapters[ci].Verses))
+			for _, v := range zhOut.Books[bi].Chapters[ci].Verses {
+				vset[v.VerseSort] = struct{}{}
+			}
+			zhChapVerses[key] = vset
+		}
+	}
+
+	// Build ZH book name lookup: USFM → localised Chinese book name.
+	zhBookName := make(map[string]string, len(zhOut.Books))
+	for _, b := range zhOut.Books {
+		zhBookName[b.BookUSFM] = b.BookName
+	}
+
+	added := 0
+	for _, enBook := range enOut.Books {
+		for _, enChap := range enBook.Chapters {
+			for _, enVerse := range enChap.Verses {
+				// Use the canonical suffix constant as the structural signal —
+				// avoids scanning the localised book/chapter prefix text and
+				// protects against accidental string drift.
+				if !strings.HasSuffix(enVerse.Note, disputedVerseSuffix) {
+					continue
+				}
+				key := chapKey{enBook.BookUSFM, enChap.ChapterSort}
+				zhChap, ok := zhChapIdx[key]
+				if !ok {
+					// ZH chapter entirely absent (fetch/parse failure during crawl).
+					// Log a warning so operators can identify chapters whose
+					// disputed verse placeholders were not inserted.
+					log.Printf("[biblecom] WARN: disputed verse %s ch%d v%d — ZH chapter absent, placeholder not inserted",
+						enBook.BookUSFM, enChap.ChapterSort, enVerse.VerseSort)
+					continue
+				}
+				// O(1) duplicate check via pre-built verse set.
+				if _, exists := zhChapVerses[key][enVerse.VerseSort]; exists {
+					continue
+				}
+				// Determine the Chinese book name (fall back to USFM if ZH book
+				// didn't make it into the output).
+				bookName := zhBookName[enBook.BookUSFM]
+				if bookName == "" {
+					bookName = enBook.BookUSFM
+				}
+				newVerse := VerseOutput{
+					VerseSort: enVerse.VerseSort,
+					Content:   "",
+					Note:      disputedNote(LangChinese, bookName, enChap.ChapterSort, enVerse.VerseSort),
+				}
+				// Insert at the correct sorted position with a single-pass scan.
+				idx := 0
+				for idx < len(zhChap.Verses) && zhChap.Verses[idx].VerseSort < enVerse.VerseSort {
+					idx++
+				}
+				// Standard Go slice-insertion idiom: grow the slice by one element
+				// (append), shift existing elements at [idx, end) one position to the
+				// right (copy — safe because append already allocated fresh backing
+				// memory), then write the new verse into the freed slot at idx.
+				// Time complexity: O(V_ch) in the worst case (idx=0), but disputed
+				// verses are rare (~16 per canon) so this path is nearly never hot.
+				zhChap.Verses = append(zhChap.Verses, VerseOutput{})
+				copy(zhChap.Verses[idx+1:], zhChap.Verses[idx:])
+				zhChap.Verses[idx] = newVerse
+				// Keep the verse set in sync so subsequent iterations (unlikely
+				// with only ~16 disputed verses) don't insert the same verse twice.
+				zhChapVerses[key][enVerse.VerseSort] = struct{}{}
+				added++
+			}
+		}
+	}
+	if added > 0 {
+		log.Printf("[biblecom] synced %d disputed verse(s) from EN into ZH output", added)
+	}
 }

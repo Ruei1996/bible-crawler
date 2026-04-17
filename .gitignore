@@ -78,3 +78,9 @@ Thumbs.db
 spec-builder
 youversion-crawler
 biblecom-importer
+# --------------------------------------------------
+# Crawler checkpoint files (large data; not source code)
+# --------------------------------------------------
+
+ckpoint.jsonl
+*.jsonl

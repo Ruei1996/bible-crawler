@@ -11,7 +11,7 @@
 ## 🌟 功能特色
 
 - **三種資料來源支援**：HTML 爬蟲、YouVersion API 爬蟲與 bible.com HTML 爬蟲，輸出至相同 Schema，資料格式完全一致。
-- **Spec 驅動爬取**（HTML 路徑）：各章節的實際節數從 `bible_books_zh.json`（和合本）與 `bible_books_en.json`（BBE）讀取，程式碼零硬寫數字，完全由 JSON 規格控制。
+- **Spec 驅動爬取**（HTML 路徑）：各章節的實際節數從 `bible_books_zh.json`（和合本）與 `bible_books_en.json`（BBE）讀取，程式碼零硬寫數字，完全由 JSON 規格控制。HTML 爬蟲（`cmd/crawler`）中，來源 HTML 缺少的節（原譯本刻意省略）以 `content: ""` 空字串寫入資料庫，並以雙 map 保護（`savedVerseNums` + `seenContentNums`）確保空行不會覆蓋真實內容。
 - **三階段工作流程**（HTML 路徑）:
   - **Stage 0 — Spec Builder**：爬取每個章節（兩語言），發現實際節數，寫入兩份 JSON 規格檔。首次建置或需更新規格時執行。
   - **Stage 1 — 書本設定**：直接從 JSON 規格寫入所有書卷的中英文書名（不需 HTTP 請求）。書卷總數完全由 Stage 0 產生的規格檔決定。
@@ -21,6 +21,7 @@
 - **編碼處理**：自動將 springbible.fhl.net 中文頁面的 **Big5** 編碼轉換為 UTF-8 後再解析。
 - **完全可配置**：來源 URL、並行數、延遲與 HTTP 逾時皆透過 `.env` 設定，網站更新時無需重新編譯。
 - **跨 Schema 遷移**（`cmd/migrate`）：TRUNCATE `bibles` schema 重新爬取前，備份並還原其他微服務 schema（`activities`、`devotions`）中無宣告 FK 的 UUID 引用。
+- **安全性強化**：`cmd/crawler/main.go` 在啟動時對 `SOURCE_ZH_URL`/`SOURCE_EN_URL` 執行 SSRF 主機允許清單驗證（CWE-918，OWASP A10:2021）。`internal/database/database.go` 在 DSN 未明確指定 `sslmode` 時自動注入 `sslmode=require`（CWE-319，OWASP A02:2021），且連線失敗時不記錄 DSN 詳情（CWE-532，OWASP A09:2021）。`internal/youversion/checkpoint.go` 透過 `filepath.IsLocal` 驗證相對路徑，防止 `..` 路徑穿越（CWE-22，OWASP A04:2021）。輸出 JSON 檔案使用 `0o640` 權限（擁有者讀寫、群組唯讀）。Spec-builder 的輸出路徑也經過 `filepath.IsLocal` 與符號連結解析的雙重路徑穿越防護。bible.com 爬蟲的文本上有爭議的新約節號現在輸出 `content: ""` 並附加可讀的 `note` 說明欄位；`syncDisputedVersesZH()` 在每次爬取後執行，為 CUNP 靜默省略的 12 個爭議節在中文輸出中插入佔位符。
 
 ## 🧪 測試
 
@@ -492,15 +493,17 @@ go run cmd/biblecom-crawler/main.go
 
 > **合併節偵測**：當 bible.com 以同一段經文顯示多個節號（例如撒母耳記下 3:9–10），解析器會將完整內容指定給最小節號，其餘節號則以哨兵文字 `"併於上節。"` 填充，並在 JSON 中以 `note: "merged"` 標記。
 
-> **交叉參照的方括號節（Cross-referenced bracket verses）**：某些譯本（如 NIV）會以方括號包住節號（例如 `[21]`），表示該節僅見於部分抄本，非譯者採用的最早手稿。bible.com 對這類節僅渲染 `__note` 腳注元素，腳注通常說明「某些抄本於此處包含類似馬可福音 9:29 的文字」——意即該節內容應填入另一節的原文。
+> **交叉參照的方括號節（Cross-referenced bracket verses）**：某些譯本（如 NIV）會以方括號包住節號（例如 `[21]`），表示該節僅見於部分抄本，非譯者採用的最早手稿。bible.com 對這類節僅渲染 `__note` 腳注元素，腳注通常說明「某些抄本於此處包含類似馬可福音 9:29 的文字」。
 >
-> 解析器以兩個階段處理此狀況：
-> 1. **偵測**：`[N]` 標記的節若僅包含 `__note` 元素（無正文），即被標記為方括號節。若腳注中含有 `<span class="ref" data-usfm="MRK.9.29">` 元素，則提取 USFM 鍵值並存入 JSON 的 `cross_ref` 欄位。
-> 2. **解析** (`resolveRefs`)：66 本書全部爬取完成後，爬蟲對所有方括號節進行一次記憶體內掃描。有 `cross_ref` 的節會從被參照的節取得實際內容（例如馬太福音 17:21 會取得馬可福音 9:29 的原文）。`note` 欄位設為 `"ref:MRK.9.29"`，`cross_ref` 保留供稽核追蹤。
+> 解析器偵測階段：`[N]` 標記的節若僅包含 `__note` 元素（無正文），即被標記為方括號節。若腳注中含有 `<span class="ref" data-usfm="MRK.9.29">` 元素，則提取 USFM 鍵值並暫存至 `cross_ref`；否則以腳注本文作為臨時 note 值。
 >
-> 若腳注中找不到 `span.ref[data-usfm]`（退回機制），則直接以腳注本文作為節的內容，`note` 設為 `"omitted"`。
+> 偵測完成後，`applyDisputedPostProcessing` 對每章結果執行，並**刻意將所有方括號節的 `content` 清空為 `""`**。`Content` 與 `CrossRef` 均被清除，`note` 欄位替換為人可閱讀的說明（格式：`"書名,第N章,第N小節,遇到特殊情境，爬蟲實作邏輯在此處留下空字串"`）。過去的 `resolveRefs` 交叉參照解析步驟（曾將被參照節的正文複製過來）**不再使用**：刻意留空才是預期的輸出。
 >
-> NIV 已知的 16 個案例：馬太福音 17:21、18:11、23:14；馬可福音 7:16、9:44、9:46、11:26、15:28；路加福音 17:36、23:17；約翰福音 5:4；使徒行傳 8:37、15:34、24:7、28:29；羅馬書 16:24。
+> 66 本書全部爬取完成後，`syncDisputedVersesZH()` 執行一次，為所有在 EN 輸出中標記為爭議節、但 CUNP 來源頁面靜默跳過的節號，在中文輸出中插入佔位符（同樣 `content: ""`，加上中文格式說明）。
+>
+> 結果：`youversion-bible_books_en.json` 包含 **16 個 EN** 爭議節條目；`youversion-bible_books_zh.json` 包含 **12 個 ZH** 佔位符條目（另外 4 個僅在 EN 出現的方括號節 — 馬可福音 9:44、9:46、11:26；羅馬書 16:24 — 在 CUNP 來源中以相同節號正常出現，不屬於中文端的爭議節）。
+>
+> NIV 已知方括號節（共 16 個）：馬太福音 17:21、18:11、23:14；馬可福音 7:16、9:44、9:46、11:26、15:28；路加福音 17:36、23:17；約翰福音 5:4；使徒行傳 8:37、15:34、24:7、28:29；羅馬書 16:24。
 
 > **sub_title 支援**：與 YouVersion API 不同，bible.com HTML 頁面包含段落標題（pericope headings）。這些標題會捕捉至每個 `VerseOutput` 的 `sub_title` 欄位，並在匯入時寫入 `bibles.bible_section_contents.sub_title`。
 
@@ -547,7 +550,11 @@ go run cmd/biblecom-importer/main.go
 
 ### 步驟 6：驗證資料（選擇性）
 
-對資料庫執行專案根目錄的 `validation.sql`。查詢涵蓋三個層級（書、章、節）。第 1–3 節（缺漏偵測）應返回 **0 筆**結果；第 5 節（版本差異稽核）會列出預期的版本差異章節，這是正常現象。
+對資料庫執行專案根目錄的 `validation.sql`，可驗證爬取完整度。主要重點：
+- **第 1–3 節**：完整爬取後應返回 **0 筆**結果。
+- **第 5 節**：列出版本差異章節 — 預期現象，非錯誤。
+- **第 9 節**：bible.com 爬蟲執行後，此節會返回刻意存為 `content: ""` 的文本爭議節資料列 — 這是**預期結果**，非匯入錯誤。
+- **第 13 節與第 14 節**：分別為中文、英文的空白節詳細診斷查詢，輸出包含 `section_id`，可直接用於 `INSERT`/`UPDATE` 補值作業。
 
 ---
 
@@ -647,7 +654,7 @@ Backup table dropped.
 
 ---
 
-對資料庫執行專案根目錄的 `validation.sql`。查詢涵蓋三個層級（書、章、節）。第 1–3 節（缺漏偵測）應返回 **0 筆**結果；第 5 節（版本差異稽核）會列出預期的版本差異章節，這是正常現象。
+對資料庫執行專案根目錄的 `validation.sql`，確認爬取完整度。第 1–3 節（缺漏偵測）應返回 **0 筆**結果；第 5 節（版本差異稽核）列出預期的版本差異章節，正常現象。bible.com 爬蟲執行後第 9 節會返回刻意留空的爭議節資料列，非錯誤。第 13、14 節提供含 `section_id` 的詳細空白節診斷供補值作業使用。
 
 ## 📂 專案結構說明
 
@@ -702,16 +709,16 @@ bible-crawler/
 │       ├── scraper_test.go       # 單元測試 — 100 % 覆蓋率
 │       ├── titles.go             # FormatChapterTitle / FormatVerseTitle（本地化模板）
 │       └── types.go              # API 回應型別（BooksResponse、PassageData、VOTDEntry…）
-├── bible_books_zh.json           # 和合本各章節數（由 spec-builder 自動產生）
-├── bible_books_en.json           # BBE 各章節數（由 spec-builder 自動產生）
-├── validation.sql                # PostgreSQL 驗證查詢 + 雙語章節內容查詢
+├── bible_books_zh.json           # 和合本各章節數（由 spec-builder 自動產生）；書卷 40–44 含 empty_verses 爭議節標注
+├── bible_books_en.json           # BBE 各章節數（由 spec-builder 自動產生）；書卷 40–44 含 empty_verses 爭議節標注
+├── validation.sql                # PostgreSQL 驗證 + 診斷查詢（共 14 節）；第 13–14 節為含 section_id 的空白節詳細診斷
 ├── .env                          # 本機 DB 連線設定與調校（不納入版控）
 ├── .env.example                  # .env 範本（所有欄位均有說明）
 ├── go.mod
 └── README_ZH.md
 ```
 
-> **注意**：已編譯的執行檔已列入 `.gitignore`，請勿提交至版本控制。請一律使用 `go run cmd/<name>/main.go` 執行。
+> **注意**：已編譯的執行檔與 `*.jsonl` 斷點檔案均已列入 `.gitignore`，請勿提交至版本控制。請一律使用 `go run cmd/<name>/main.go` 執行。
 
 ## ⚠️ 常見問題排除
 
@@ -723,6 +730,9 @@ A：請確認 PostgreSQL 服務已啟動並監聽 5432 連接埠。
 
 **Q：驗證 SQL 有缺漏資料**  
 A：`validation.sql` 第 5 節列出的版本差異章節為正常現象。第 1–3 節若有缺漏，請重新執行 `cmd/crawler`（完全冪等，不會產生重複資料）。
+
+**Q：bible.com 爬蟲執行後，`validation.sql` 第 9 節返回資料列**  
+A：此為**預期現象**。文本上有爭議的新約節（如 Matt 18:11、Mark 7:16、Acts 8:37）由 biblecom 爬蟲刻意以 `content: ""` 存入資料庫 — 這些節存在是為了保留 section 結構，但不含正文，並非匯入錯誤。請使用第 13 節（中文）與第 14 節（英文）的詳細診斷查詢，可依 `problem_type` 欄位區分刻意留空的爭議節（`"⚠ content 為空白字元"` / `"⚠ content is blank"`）與真正缺失的資料列（`"❌ 完全缺少 contents 行"` / `"❌ missing row entirely"`）。
 
 **Q：資料出現亂碼（Mojibake）**  
 A：爬蟲已內建 Big5 轉 UTF-8 處理。請勿修改 `internal/utils/encoding.go` 的編碼邏輯。

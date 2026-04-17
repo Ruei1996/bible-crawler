@@ -11,9 +11,9 @@ A Go-based Bible crawler that populates a PostgreSQL database with a strict, nor
 ## 🌟 Features
 
 - **Three Data Sources**:
-  - **HTML Scraper** (`cmd/crawler`): crawls Chinese Union Version (和合本 CUV) and BBE from `springbible.fhl.net`. Spec-driven — verse counts come from JSON spec files.
+  - **HTML Scraper** (`cmd/crawler`): crawls Chinese Union Version (和合本 CUV) and BBE from `springbible.fhl.net`. Spec-driven — verse counts come from JSON spec files. Verses absent from the HTML (intentionally omitted by the translation) are written as `content: ""` rows using a dual-map guard (`savedVerseNums` + `seenContentNums`) that prevents empty rows from overwriting real content on retry.
   - **YouVersion API Crawler** (`cmd/youversion-crawler` + `cmd/youversion-importer`): fetches Bible content via the [YouVersion Platform API](https://developers.youversion.com/api/bibles). No spec files needed — all structure is derived from the API. Operates in **parallel mode only** (N workers + rate-limit + exponential-backoff retry + JSONL checkpoint for resume). Uses CSB 中文標準譯本 (ID 312) for Chinese and NIV 2011 (ID 111) for English by default.
-  - **Bible.com HTML Crawler** (`cmd/biblecom-crawler` + `cmd/biblecom-importer`): scrapes `bible.com` HTML pages for CUNP-上帝 (Chinese, ID 414) and NIV (English, ID 111). Step C-1 outputs two JSON files — one per language — for inspection before import. Step C-2 (`cmd/biblecom-importer`) reads both JSON files and upserts all content into PostgreSQL. Supports pericope section headings (`sub_title`) and merged-verse detection.
+  - **Bible.com HTML Crawler** (`cmd/biblecom-crawler` + `cmd/biblecom-importer`): scrapes `bible.com` HTML pages for CUNP-上帝 (Chinese, ID 414) and NIV (English, ID 111). Step C-1 outputs two JSON files — one per language — for inspection before import. Step C-2 (`cmd/biblecom-importer`) reads both JSON files and upserts all content into PostgreSQL. Supports pericope section headings (`sub_title`) and merged-verse detection. Textually-disputed NT verses produce `content: ""` with a human-readable `note` field explaining the omission; `syncDisputedVersesZH()` runs after every crawl to insert Chinese-side placeholder entries for the 12 disputed verses that the CUNP source silently omits.
 - **Spec-Driven Crawling** (HTML path): Per-language verse counts are sourced from `bible_books_zh.json` / `bible_books_en.json`. The crawler never hard-codes verse numbers — all limits come from the JSON spec files.
 - **Three-Stage Workflow** (HTML path):
   - **Stage 0 — Spec Builder**: Crawls every chapter in both languages to discover actual verse counts, then writes the two JSON spec files. Run once (or whenever you need to refresh the spec).
@@ -24,6 +24,7 @@ A Go-based Bible crawler that populates a PostgreSQL database with a strict, nor
 - **Robust Encoding**: Automatically decodes **Big5** (Chinese pages from springbible.fhl.net) to UTF-8 before parsing.
 - **Fully Configurable**: Source URLs, concurrency, delays, and HTTP timeouts are all set via `.env` — no recompile needed when a website changes.
 - **Cross-Schema Migration** (`cmd/migrate`): Before truncating the `bibles` schema for a re-crawl, back up and restore UUID references held by other microservice schemas (`activities`, `devotions`) that lack declared FK constraints.
+- **Security Hardening**: `cmd/crawler/main.go` validates `SOURCE_ZH_URL`/`SOURCE_EN_URL` against an SSRF host allowlist at startup (CWE-918, OWASP A10:2021). `internal/database/database.go` injects `sslmode=require` when the DSN omits an explicit `sslmode` (CWE-319, OWASP A02:2021) and never logs DSN details on connection failure (CWE-532, OWASP A09:2021). Checkpoint paths in `internal/youversion/checkpoint.go` are validated with `filepath.IsLocal` to block `..` traversal (CWE-22, OWASP A04:2021). Output JSON files use mode `0o640` (owner rw, group r). Spec-builder output paths are guarded against path traversal via `filepath.IsLocal` and symlink resolution.
 
 ## 🧪 Testing
 
@@ -496,15 +497,17 @@ The output files are controlled by `BIBLECOM_OUTPUT_ZH` and `BIBLECOM_OUTPUT_EN`
 
 > **Merged verses**: When bible.com displays two or more verse numbers with a single shared text (e.g. 2 Samuel 3:9–10), the parser assigns the full content to the lowest-numbered verse. All secondary verse numbers receive the sentinel text `"併於上節。"` (merged with the verse above) and are annotated with `note: "merged"` in the JSON output.
 
-> **Cross-referenced bracket verses** (bracket-labeled): In NIV and similar modern translations, textually-disputed verses (e.g. Matthew 17:21, Mark 9:44, 9:46, John 5:4) are rendered on bible.com with a bracketed verse number `[21]` and a footnote-only element. The footnote typically says *"Some manuscripts include here words similar to Mark 9:29."* — meaning the verse should carry the content of another verse in the same translation.
+> **Cross-referenced bracket verses** (bracket-labeled): In NIV and similar modern translations, textually-disputed verses (e.g. Matthew 17:21, Mark 9:44, 9:46, John 5:4) are rendered on bible.com with a bracketed verse number `[21]` and a footnote-only element.
 >
-> The parser handles this in two stages:
-> 1. **Detection**: `[N]`-labeled verses containing a `__note` element (no prose) are flagged as bracket verses. If the note contains a `<span class="ref" data-usfm="MRK.9.29">` element, the USFM key is extracted and stored as `cross_ref` in the JSON.
-> 2. **Resolution** (`resolveRefs`): After all 66 books are crawled in memory, the scraper performs a single pass over every bracket verse. Verses with a `cross_ref` field have their `Content` filled in from the referenced verse (e.g. Matthew 17:21 gets the text of Mark 9:29). The `note` field is set to `"ref:MRK.9.29"` and `cross_ref` is retained for audit purposes.
+> The parser detects these in one stage: `[N]`-labeled verses that contain only a `__note` element (no prose) are flagged as bracket verses. If the footnote contains a `<span class="ref" data-usfm="MRK.9.29">` element the USFM key is extracted and stored as `cross_ref`; otherwise the footnote body text is recorded temporarily as the note value.
 >
-> If no `span.ref[data-usfm]` is found in the footnote (fallback), the footnote body text is used as the verse content directly, and `note` is set to `"omitted"`.
+> After detection, `applyDisputedPostProcessing` runs on every chapter result and **intentionally stores `content: ""`** for all bracket verses. Both `Content` and `CrossRef` are cleared and the `note` field is replaced with a human-readable explanation that embeds the book name, chapter, and verse number (e.g. `"Matthew,chapter 18,verse 11,遇到特殊情境，爬蟲實作邏輯在此處留下空字串"`). The earlier `resolveRefs` cross-reference resolution pass — which would have copied prose from the referenced verse — is **not used**: intentionally-empty content is the desired output.
 >
-> Known NIV examples: Matthew 17:21, 18:11, 23:14; Mark 7:16, 9:44, 9:46, 11:26, 15:28; Luke 17:36, 23:17; John 5:4; Acts 8:37, 15:34, 24:7, 28:29; Romans 16:24.
+> After all 66 books finish, `syncDisputedVersesZH()` runs once and inserts Chinese-side placeholder entries (also `content: ""` with a Chinese-format note) for every EN bracket verse whose verse number is absent from the CUNP output. The CUNP source on bible.com silently skips these disputed verse numbers without any bracket label, so without this sync step those positions would be missing from the ZH JSON entirely.
+>
+> As a result `youversion-bible_books_en.json` contains **16 EN** disputed verse entries and `youversion-bible_books_zh.json` contains **12 ZH** placeholder entries (the 4 EN-only bracket verses — Mark 9:44, 9:46, 11:26; Romans 16:24 — already appear in the CUNP source under the same verse number and are not disputed there).
+>
+> Known NIV bracket verses (16 total): Matthew 17:21, 18:11, 23:14; Mark 7:16, 9:44, 9:46, 11:26, 15:28; Luke 17:36, 23:17; John 5:4; Acts 8:37, 15:34, 24:7, 28:29; Romans 16:24.
 
 > **sub_title support**: Unlike the YouVersion API, bible.com HTML pages include pericope section headings. These are captured in the `sub_title` field of each verse and written to `bibles.bible_section_contents.sub_title` during import.
 
@@ -550,6 +553,12 @@ The importer reads `BIBLECOM_OUTPUT_ZH` and `BIBLECOM_OUTPUT_EN` from `.env`. It
 ---
 
 ### Step 6: Validate (optional)
+
+Run `validation.sql` against your PostgreSQL database to verify completeness. Key sections:
+- **Sections 1–3**: should return **0 rows** after a complete crawl.
+- **Section 5**: lists versification-difference chapters — expected and normal.
+- **Section 9**: returns rows for textually-disputed NT verses with intentionally-empty `content` (biblecom crawler only) — these are **expected**, not errors.
+- **Sections 13 & 14**: detailed Chinese / English empty-verse diagnostics with `section_id` for direct `INSERT`/`UPDATE` remediation.
 
 ---
 
@@ -649,7 +658,7 @@ Backup table dropped.
 
 ---
 
-Run `validation.sql` (at the project root) against your PostgreSQL database. The queries check all three levels (books, chapters, verses). Results should return **0 rows** for Sections 1–3. Section 5 will list versification-difference chapters — that is expected and normal.
+Run `validation.sql` (at the project root) against your PostgreSQL database. The queries check all three levels (books, chapters, verses). Results should return **0 rows** for Sections 1–3. Section 5 will list versification-difference chapters — that is expected and normal. Section 9 ("Empty content guard") will return rows for textually-disputed NT verses that are intentionally stored with `content: ""` after a bible.com crawl — these are expected, not import errors. Sections 13 and 14 are detailed diagnostic queries (Chinese and English respectively) that include `section_id` for direct `INSERT`/`UPDATE` remediation of empty-verse rows.
 
 ## 📂 Project Structure
 
@@ -704,16 +713,16 @@ bible-crawler/
 │       ├── scraper_test.go       # Unit tests — 100 % coverage
 │       ├── titles.go             # FormatChapterTitle / FormatVerseTitle (localised templates)
 │       └── types.go              # API response types (BooksResponse, PassageData, VOTDEntry, …)
-├── bible_books_zh.json           # Per-chapter verse counts for 和合本 (auto-generated)
-├── bible_books_en.json           # Per-chapter verse counts for BBE    (auto-generated)
-├── validation.sql                # PostgreSQL validation + bilingual chapter viewer queries
+├── bible_books_zh.json           # Per-chapter verse counts for 和合本 (auto-generated); books 40–44 include empty_verses annotations for disputed NT verses
+├── bible_books_en.json           # Per-chapter verse counts for BBE    (auto-generated); books 40–44 include empty_verses annotations for disputed NT verses
+├── validation.sql                # PostgreSQL validation + diagnostic queries (14 sections); Sections 13–14 are detailed empty-verse diagnostics with section_id for remediation
 ├── .env                          # Local DB credentials and settings (not committed)
 ├── .env.example                  # Template for .env (all fields documented)
 ├── go.mod
 └── README.md
 ```
 
-> **Note**: compiled binaries are listed in `.gitignore` and must not be committed. Always run via `go run cmd/<name>/main.go`.
+> **Note**: compiled binaries and `*.jsonl` checkpoint files are listed in `.gitignore` and must not be committed. Always run via `go run cmd/<name>/main.go`.
 
 ## ⚠️ Troubleshooting
 
@@ -725,6 +734,9 @@ A: Ensure PostgreSQL is running and listening on port 5432.
 
 **Q: Validation SQL returns missing rows.**  
 A: Section 5 of `validation.sql` lists versification-difference chapters — these are expected. Sections 1–3 should all return 0 rows after a complete crawl. If they do not, re-run `cmd/crawler` (it is fully idempotent).
+
+**Q: Section 9 of `validation.sql` returns rows after a bible.com crawl.**  
+A: This is expected. Textually-disputed NT verses (e.g. Matt 18:11, Mark 7:16, Acts 8:37) are intentionally stored with `content: ""` by the biblecom crawler — they exist in the DB to preserve section structure but carry no prose. These rows are not import errors. Use Sections 13 and 14 of `validation.sql` for detailed per-verse diagnostics that distinguish intentionally-empty disputed verses (problem_type `"⚠ content is blank"`) from genuinely missing rows (problem_type `"❌ missing row entirely"`).
 
 **Q: Data looks garbled (mojibake).**  
 A: The crawler decodes Big5 pages before parsing. Do not modify `internal/utils/encoding.go`.

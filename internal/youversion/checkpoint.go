@@ -91,14 +91,31 @@ type Checkpoint struct {
 // NewCheckpoint opens (or creates) the JSONL file at path in append mode and
 // returns a ready-to-use Checkpoint. Call Close when the crawler exits.
 //
-// path is canonicalised via filepath.Abs to prevent directory traversal.
+// Relative paths are subject to CWD-confinement: filepath.IsLocal ensures the
+// path cannot escape the working directory via ".." components (CWE-22, A04:2021).
+// Absolute paths (e.g. /data/checkpoints/bible.jsonl) are accepted as-is —
+// the operator has made an explicit choice. This mirrors the confinement logic
+// in internal/biblecom/scraper.go::writeJSON.
 // File is created with mode 0600 (owner read/write only) to protect API usage
 // metadata from other local users.
 func NewCheckpoint(path string) (*Checkpoint, error) {
-	cleaned, err := filepath.Abs(path)
+	// ── Relative-path confinement (CWE-22, A04:2021) ─────────────────────────
+	// Relative paths like "../../etc/cron.d/biblecom" escape the working
+	// directory. filepath.IsLocal rejects any path that is not local (i.e. has
+	// leading "..", starts with "/", or is "."). Absolute paths are operator-
+	// intentional and bypass this check.
+	if !filepath.IsAbs(path) && !filepath.IsLocal(path) {
+		return nil, fmt.Errorf(
+			"checkpoint path %q would escape working directory (CWE-22); use an absolute path or a local relative path",
+			path)
+	}
+	// ─────────────────────────────────────────────────────────────────────────
+
+	cleaned, err := filepath.Abs(filepath.Clean(path))
 	if err != nil {
 		return nil, fmt.Errorf("resolve checkpoint path %q: %w", path, err)
 	}
+
 	// O_APPEND positions the write cursor atomically at EOF before each write
 	// (POSIX-guaranteed), preventing data loss when the file already contains
 	// records from a previous run. O_CREATE creates the file on first use.

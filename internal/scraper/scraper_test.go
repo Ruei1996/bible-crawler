@@ -238,11 +238,25 @@ func TestSaveVerse_NegativeVerseNum(t *testing.T) {
 }
 
 func TestSaveVerse_EmptyContent(t *testing.T) {
-	repo, _ := newMockRepo(t)
+	repo, mock := newMockRepo(t)
 	s := newScraper(repo, makeMinimalSpec(0, 0, 0), &config.Config{})
+
+	// Empty/whitespace content is valid for textually-disputed verses that
+	// are intentionally absent from the source translation.  The structural
+	// section row must be created and the content row inserted with content=''.
+	secID := uuid.New()
+	mock.ExpectQuery(qre(sqlSelectSection)).
+		WillReturnRows(sqlmock.NewRows([]string{"id"}))
+	mock.ExpectQuery(qre(sqlInsertSection)).
+		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(secID))
+	mock.ExpectQuery(qre(sqlSelectSectionContent)).
+		WillReturnRows(sqlmock.NewRows([]string{"title", "content", "sub_title"}))
+	mock.ExpectExec(qre(sqlInsertSectionContent)).
+		WillReturnResult(sqlmock.NewResult(1, 1))
+
 	err := s.saveVerse(uuid.New(), uuid.New(), 1, LangEnglish, "   ")
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "empty verse content")
+	require.NoError(t, err, "empty/whitespace content must be accepted")
+	assert.NoError(t, mock.ExpectationsWereMet())
 }
 
 func TestSaveVerse_ValidEnglish(t *testing.T) {
@@ -567,8 +581,11 @@ func TestCrawlChapters_UpsertChapterContentError(t *testing.T) {
 }
 
 func TestCrawlChapters_InvalidVerseValue(t *testing.T) {
-	// Verse has value="notanumber" → fallback to sequential index; also has
-	// an empty-text li → early skip.
+	// <li value="notanumber"> falls back to sequential index → verseNum = 1.
+	// <li value="1"> has whitespace-only text → content is "" after CleanText,
+	// so it falls through to the gap-filling loop along with verse 2 (absent).
+	// The gap-filling loop saves "" for verse 2; verse 1 is already in
+	// savedVerseNums from the first li so it is not written again.
 	htmlInvalidVerseVal := `<html><body><ol>
 <li value="notanumber">valid verse text</li>
 <li value="1">  </li>
@@ -583,6 +600,7 @@ func TestCrawlChapters_InvalidVerseValue(t *testing.T) {
 	mock.MatchExpectationsInOrder(false)
 	chapID := uuid.New()
 	secID := uuid.New()
+	secID2 := uuid.New()
 
 	// ZH: chapter + 1 verse (fallback verseNum = 1)
 	mock.ExpectQuery(qre(`SELECT id FROM bibles.bible_chapters WHERE bible_book_id = $1 AND sort = $2`)).
@@ -603,7 +621,7 @@ func TestCrawlChapters_InvalidVerseValue(t *testing.T) {
 	mock.ExpectExec(qre(`INSERT INTO bibles.bible_chapter_contents (bible_chapter_id, language, title) VALUES ($1, $2, $3)`)).
 		WillReturnResult(sqlmock.NewResult(1, 1))
 
-	// Section for the fallback-indexed verse (both ZH and EN)
+	// Verse 1: valid text → saved with actual content (both ZH and EN)
 	mock.ExpectQuery(qre(sqlSelectSection)).WillReturnRows(sqlmock.NewRows([]string{"id"}))
 	mock.ExpectQuery(qre(sqlInsertSection)).WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(secID))
 	mock.ExpectQuery(qre(sqlSelectSection)).WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(secID))
@@ -612,7 +630,85 @@ func TestCrawlChapters_InvalidVerseValue(t *testing.T) {
 	mock.ExpectQuery(qre(sqlSelectSectionContent)).WillReturnRows(sqlmock.NewRows([]string{"title", "content", "sub_title"}))
 	mock.ExpectExec(qre(sqlInsertSectionContent)).WillReturnResult(sqlmock.NewResult(1, 1))
 
+	// Verse 2: absent from HTML → gap-fill saves "" (both ZH and EN)
+	mock.ExpectQuery(qre(sqlSelectSection)).WillReturnRows(sqlmock.NewRows([]string{"id"}))
+	mock.ExpectQuery(qre(sqlInsertSection)).WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(secID2))
+	mock.ExpectQuery(qre(sqlSelectSection)).WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(secID2))
+	mock.ExpectQuery(qre(sqlSelectSectionContent)).WillReturnRows(sqlmock.NewRows([]string{"title", "content", "sub_title"}))
+	mock.ExpectExec(qre(sqlInsertSectionContent)).WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectQuery(qre(sqlSelectSectionContent)).WillReturnRows(sqlmock.NewRows([]string{"title", "content", "sub_title"}))
+	mock.ExpectExec(qre(sqlInsertSectionContent)).WillReturnResult(sqlmock.NewResult(1, 1))
+
 	bspec := makeMinimalSpec(0, 1, 2) // maxVerses = 2
+	cfg := &config.Config{
+		SourceDomain: "127.0.0.1", SourceZHURL: srv.URL + "/%d",
+		SourceENURL: srv.URL + "/%d", CrawlerParallelism: 1,
+		HTTPTimeoutSec: 5,
+	}
+	s := NewBibleScraper(repo, bspec, cfg)
+	s.crawlChapters([]BookMeta{{ID: uuid.New(), Index: 0}})
+	assert.NoError(t, mock.ExpectationsWereMet())
+}
+
+// TestCrawlChapters_IconOnlyVerse verifies that a <li> element whose entire
+// content is a non-text HTML element (e.g. an <img> icon used by English BBE
+// springbible pages for bracket/disputed verses) results in an empty-content
+// bible_section_contents row, identical to the behaviour for a verse that is
+// completely absent from the HTML.
+func TestCrawlChapters_IconOnlyVerse(t *testing.T) {
+	// verse 1: normal prose; verse 2: icon-only (no text inside the <li>)
+	htmlIconVerse := `<html><body><ol>
+<li value="1">In the beginning God created the heavens and the earth.</li>
+<li value="2"><img src="bracket-icon.gif" alt="disputed"></li>
+</ol></body></html>`
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, htmlIconVerse)
+	}))
+	t.Cleanup(srv.Close)
+
+	repo, mock := newMockRepo(t)
+	mock.MatchExpectationsInOrder(false)
+	chapID := uuid.New()
+	secID1 := uuid.New()
+	secID2 := uuid.New()
+
+	// Chapter ZH (create) + EN (find)
+	mock.ExpectQuery(qre(`SELECT id FROM bibles.bible_chapters WHERE bible_book_id = $1 AND sort = $2`)).
+		WillReturnRows(sqlmock.NewRows([]string{"id"}))
+	mock.ExpectQuery(qre(`INSERT INTO bibles.bible_chapters (bible_book_id, sort) VALUES ($1, $2) ON CONFLICT (bible_book_id, sort) DO NOTHING RETURNING id`)).
+		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(chapID))
+	mock.ExpectQuery(qre(`SELECT id FROM bibles.bible_chapters WHERE bible_book_id = $1 AND sort = $2`)).
+		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(chapID))
+	// Chapter content ZH + EN
+	mock.ExpectQuery(qre(`SELECT title FROM bibles.bible_chapter_contents WHERE bible_chapter_id = $1 AND language = $2`)).
+		WillReturnRows(sqlmock.NewRows([]string{"title"}))
+	mock.ExpectExec(qre(`INSERT INTO bibles.bible_chapter_contents (bible_chapter_id, language, title) VALUES ($1, $2, $3)`)).
+		WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectQuery(qre(`SELECT title FROM bibles.bible_chapter_contents WHERE bible_chapter_id = $1 AND language = $2`)).
+		WillReturnRows(sqlmock.NewRows([]string{"title"}))
+	mock.ExpectExec(qre(`INSERT INTO bibles.bible_chapter_contents (bible_chapter_id, language, title) VALUES ($1, $2, $3)`)).
+		WillReturnResult(sqlmock.NewResult(1, 1))
+
+	// Verse 1: has prose content → saved normally (ZH + EN)
+	mock.ExpectQuery(qre(sqlSelectSection)).WillReturnRows(sqlmock.NewRows([]string{"id"}))
+	mock.ExpectQuery(qre(sqlInsertSection)).WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(secID1))
+	mock.ExpectQuery(qre(sqlSelectSection)).WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(secID1))
+	mock.ExpectQuery(qre(sqlSelectSectionContent)).WillReturnRows(sqlmock.NewRows([]string{"title", "content", "sub_title"}))
+	mock.ExpectExec(qre(sqlInsertSectionContent)).WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectQuery(qre(sqlSelectSectionContent)).WillReturnRows(sqlmock.NewRows([]string{"title", "content", "sub_title"}))
+	mock.ExpectExec(qre(sqlInsertSectionContent)).WillReturnResult(sqlmock.NewResult(1, 1))
+
+	// Verse 2: icon-only <li> → gap-fill saves "" (ZH + EN)
+	mock.ExpectQuery(qre(sqlSelectSection)).WillReturnRows(sqlmock.NewRows([]string{"id"}))
+	mock.ExpectQuery(qre(sqlInsertSection)).WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(secID2))
+	mock.ExpectQuery(qre(sqlSelectSection)).WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(secID2))
+	mock.ExpectQuery(qre(sqlSelectSectionContent)).WillReturnRows(sqlmock.NewRows([]string{"title", "content", "sub_title"}))
+	mock.ExpectExec(qre(sqlInsertSectionContent)).WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectQuery(qre(sqlSelectSectionContent)).WillReturnRows(sqlmock.NewRows([]string{"title", "content", "sub_title"}))
+	mock.ExpectExec(qre(sqlInsertSectionContent)).WillReturnResult(sqlmock.NewResult(1, 1))
+
+	bspec := makeMinimalSpec(0, 1, 2) // 2 verses per chapter
 	cfg := &config.Config{
 		SourceDomain: "127.0.0.1", SourceZHURL: srv.URL + "/%d",
 		SourceENURL: srv.URL + "/%d", CrawlerParallelism: 1,

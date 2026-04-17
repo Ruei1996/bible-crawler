@@ -387,10 +387,10 @@ func (r *BibleRepository) UpsertSectionContentFull(sectionID uuid.UUID, lang, ti
 	if err != nil {
 		return err
 	}
-	normalizedContent, err := normalizeRequired("section content", content)
-	if err != nil {
-		return err
-	}
+	// Empty content is allowed for textually-disputed verses intentionally
+	// absent from the source translation (e.g. CUV Matthew 18:11, Acts 8:37).
+	// Downstream consumers can identify these rows by content = ''.
+	normalizedContent := strings.TrimSpace(content)
 	// sub_title is optional; normalise whitespace but do not reject empty values.
 	normalizedSubTitle := strings.TrimSpace(subTitle)
 	// Guard input lengths against tampered JSON files (CWE-400).
@@ -752,14 +752,16 @@ func (r *BibleRepository) BulkUpsertSectionContents(records []SectionContentReco
 		if _, err := normalizeRequired("section title", rec.Title); err != nil {
 			return fmt.Errorf("BulkUpsertSectionContents record[%d]: %w", i, err)
 		}
-		if _, err := normalizeRequired("section content", rec.Content); err != nil {
-			return fmt.Errorf("BulkUpsertSectionContents record[%d]: %w", i, err)
-		}
+		// Empty content is allowed for textually-disputed verses (see UpsertSectionContentFull).
+		// Normalise whitespace in-place so the bulk path stores the same value as
+		// the scalar UpsertSectionContentFull path, preventing spurious UPDATE
+		// operations when both paths touch the same row across re-runs.
+		records[i].Content = strings.TrimSpace(rec.Content)
 		if len(rec.Title) > maxTitleBytes {
 			return fmt.Errorf("BulkUpsertSectionContents record[%d]: title too long (%d bytes)", i, len(rec.Title))
 		}
-		if len(rec.Content) > maxContentBytes {
-			return fmt.Errorf("BulkUpsertSectionContents record[%d]: content too long (%d bytes)", i, len(rec.Content))
+		if len(records[i].Content) > maxContentBytes {
+			return fmt.Errorf("BulkUpsertSectionContents record[%d]: content too long (%d bytes)", i, len(records[i].Content))
 		}
 		if len(rec.SubTitle) > maxSubTitleBytes {
 			return fmt.Errorf("BulkUpsertSectionContents record[%d]: sub_title too long (%d bytes)", i, len(rec.SubTitle))
@@ -799,6 +801,14 @@ func (r *BibleRepository) BulkUpsertSectionContents(records []SectionContentReco
 		if !exists {
 			toInsert = append(toInsert, rec)
 		} else if ex.title != rec.Title || ex.content != rec.Content || ex.subTitle != rec.SubTitle {
+			// Plain string equality is reliable here because:
+			//   (a) rec.Content was TrimSpace'd in-place in the validation loop
+			//       above, so it carries the same whitespace normalisation as
+			//       content stored by UpsertSectionContentFull.
+			//   (b) The SELECT uses COALESCE(sub_title, '') which maps legacy
+			//       NULL sub_title values (written by earlier crawlers) to ""
+			//       — the same value this function always stores — so no IS NULL
+			//       guard is needed and false-positive UPDATE rows are avoided.
 			toUpdate = append(toUpdate, rec)
 		}
 	}

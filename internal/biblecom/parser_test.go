@@ -719,8 +719,9 @@ func TestExtractContent_RemovesNoteAndLabel(t *testing.T) {
 // TestParseChapter_BracketOmittedVerse verifies that a bracket-labeled verse
 // (e.g. NIV Matthew 17:21) is detected and its cross-reference USFM extracted
 // from the __note's <span class="ref" data-usfm="…"> element. Content is left
-// empty by ParseChapter (resolveRefs fills it in after the full crawl), and
-// CrossRef/Note are set for JSON auditability.
+// empty by ParseChapter, and CrossRef/Note are set for JSON auditability.
+// The scraper's processItem will later clear CrossRef and replace Note with a
+// human-readable disputed-verse annotation.
 //
 // Also verifies the two-span pattern: the bracket span plus a whitespace-only
 // spacer span for the same verse number — the spacer must be silently dropped.
@@ -767,11 +768,11 @@ func TestParseChapter_BracketOmittedVerse(t *testing.T) {
 
 	assert.Equal(t, 21, verses[1].VerseSort)
 	assert.Empty(t, verses[1].Content,
-		"bracket verse content must be empty pre-resolveRefs when CrossRef is set")
+		"bracket verse content must be empty (processItem will finalize it)")
 	assert.Equal(t, "ref:MRK.9.29", verses[1].Note,
 		"bracket verse must be annotated Note=ref:USFM")
 	assert.Equal(t, "MRK.9.29", verses[1].CrossRef,
-		"CrossRef must hold the raw USFM for resolveRefs lookup")
+		"CrossRef must hold the raw USFM for JSON auditability")
 	assert.Empty(t, verses[1].SubTitle, "bracket verse must not carry an accidental sub_title")
 
 	assert.Equal(t, 22, verses[2].VerseSort)
@@ -987,85 +988,6 @@ func TestParseChapter_MultipleAdjacentBracketVerses(t *testing.T) {
 	assert.Equal(t, "Some manuscripts add verse 46 (see v. 48).", verses[3].Content)
 	assert.Equal(t, "omitted", verses[3].Note)
 	assert.Empty(t, verses[3].CrossRef)
-}
-
-// TestResolveRefs_UnresolvableRef verifies the fallback path when a CrossRef
-// key is absent from the OutputFile (e.g. the target chapter failed to fetch
-// during a partial crawl or was cancelled mid-run). The verse must receive the
-// bracketed placeholder content "[See BOOK.CHAP.VERSE]" rather than an empty
-// string, so the DB import never hits an empty-content error.
-func TestResolveRefs_UnresolvableRef(t *testing.T) {
-	// MRK book intentionally omitted to simulate a failed chapter fetch.
-	out := &OutputFile{
-		Books: []BookOutput{
-			{
-				BookUSFM: "MAT",
-				Chapters: []ChapterOutput{
-					{
-						ChapterSort: 17,
-						Verses: []VerseOutput{
-							{VerseSort: 21, Content: "", Note: "ref:MRK.9.29", CrossRef: "MRK.9.29"},
-						},
-					},
-				},
-			},
-		},
-	}
-
-	resolveRefs(out)
-
-	v := out.Books[0].Chapters[0].Verses[0]
-	assert.Equal(t, "[See MRK.9.29]", v.Content,
-		"unresolvable CrossRef must produce a non-empty bracketed placeholder for DB import")
-	assert.Equal(t, "ref:MRK.9.29", v.Note,
-		"Note must be preserved unchanged after failed resolution")
-	assert.Equal(t, "MRK.9.29", v.CrossRef,
-		"CrossRef must be preserved for audit trail even when resolution fails")
-}
-
-// all chapters have been scraped. A verse with CrossRef="MRK.9.29" must have
-// its Content filled in from the Mark 9:29 verse in the same OutputFile.
-func TestResolveRefs(t *testing.T) {
-	out := &OutputFile{
-		Books: []BookOutput{
-			{
-				BookUSFM: "MAT",
-				Chapters: []ChapterOutput{
-					{
-						ChapterSort: 17,
-						Verses: []VerseOutput{
-							{VerseSort: 21, Content: "", Note: "ref:MRK.9.29", CrossRef: "MRK.9.29"},
-						},
-					},
-				},
-			},
-			{
-				BookUSFM: "MRK",
-				Chapters: []ChapterOutput{
-					{
-						ChapterSort: 9,
-						Verses: []VerseOutput{
-							{VerseSort: 29, Content: "This kind can come out only by prayer.", Note: ""},
-						},
-					},
-				},
-			},
-		},
-	}
-
-	resolveRefs(out)
-
-	mat17 := out.Books[0].Chapters[0].Verses[0]
-	assert.Equal(t, "This kind can come out only by prayer.", mat17.Content,
-		"resolveRefs must copy the target verse content into the cross-ref verse")
-	assert.Equal(t, "ref:MRK.9.29", mat17.Note,
-		"Note must remain unchanged after resolution")
-	assert.Equal(t, "MRK.9.29", mat17.CrossRef,
-		"CrossRef must remain for audit trail after resolution")
-
-	// Source verse must be unchanged.
-	mrk9 := out.Books[1].Chapters[0].Verses[0]
-	assert.Equal(t, "This kind can come out only by prayer.", mrk9.Content)
 }
 
 // TestParseChapter_ReferenceContainerExcludedFromSubTitle verifies that a

@@ -1,6 +1,10 @@
 module bible-crawler
 
-go 1.25.0
+// NOTE: go1.26.0 is the currently installed toolchain. Upgrade to go1.26.2 when
+// available to patch stdlib CVEs: GO-2026-4870 (TLS 1.3 DoS), GO-2026-4866/4600/4599
+// (x509 constraint bypasses), GO-2026-4601 (net/url IPv6 mis-parse),
+// GO-2026-4947/4946 (x509 CPU exhaustion).
+go 1.26.0
 
 require (
 	github.com/DATA-DOG/go-sqlmock v1.5.2

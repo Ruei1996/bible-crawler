@@ -2,7 +2,7 @@
   "version": "NIV",
   "version_id": 111,
   "language": "english",
-  "crawled_at": "2026-04-09T14:37:11.844343Z",
+  "crawled_at": "2026-04-17T09:23:29.208527Z",
   "books": [
     {
       "book_sort": 1,
@@ -101379,9 +101379,8 @@
             },
             {
               "verse_sort": 21,
-              "content": "He replied, “This kind can come out only by prayer.”",
-              "note": "ref:MRK.9.29",
-              "cross_ref": "MRK.9.29"
+              "content": "",
+              "note": "Matthew,chapter 17,verse 21,遇到特殊情境，爬蟲實作邏輯在此處留下空字串"
             },
             {
               "verse_sort": 22,
@@ -101459,9 +101458,8 @@
             },
             {
               "verse_sort": 11,
-              "content": "For the Son of Man came to seek and to save the lost.”",
-              "note": "ref:LUK.19.10",
-              "cross_ref": "LUK.19.10"
+              "content": "",
+              "note": "Matthew,chapter 18,verse 11,遇到特殊情境，爬蟲實作邏輯在此處留下空字串"
             },
             {
               "verse_sort": 12,
@@ -102284,9 +102282,8 @@
             },
             {
               "verse_sort": 14,
-              "content": "They devour widows’ houses and for a show make lengthy prayers. These men will be punished most severely.”",
-              "note": "ref:MRK.12.40",
-              "cross_ref": "MRK.12.40"
+              "content": "",
+              "note": "Matthew,chapter 23,verse 14,遇到特殊情境，爬蟲實作邏輯在此處留下空字串"
             },
             {
               "verse_sort": 15,
@@ -104594,8 +104591,8 @@
             },
             {
               "verse_sort": 16,
-              "content": "Some manuscripts include here the words of 4:23.",
-              "note": "omitted"
+              "content": "",
+              "note": "Mark,chapter 7,verse 16,遇到特殊情境，爬蟲實作邏輯在此處留下空字串"
             },
             {
               "verse_sort": 17,
@@ -105030,8 +105027,8 @@
             },
             {
               "verse_sort": 44,
-              "content": "Some manuscripts include here the words of verse 48.",
-              "note": "omitted"
+              "content": "",
+              "note": "Mark,chapter 9,verse 44,遇到特殊情境，爬蟲實作邏輯在此處留下空字串"
             },
             {
               "verse_sort": 45,
@@ -105039,8 +105036,8 @@
             },
             {
               "verse_sort": 46,
-              "content": "Some manuscripts include here the words of verse 48.",
-              "note": "omitted"
+              "content": "",
+              "note": "Mark,chapter 9,verse 46,遇到特殊情境，爬蟲實作邏輯在此處留下空字串"
             },
             {
               "verse_sort": 47,
@@ -105386,9 +105383,8 @@
             },
             {
               "verse_sort": 26,
-              "content": "But if you do not forgive others their sins, your Father will not forgive your sins.",
-              "note": "ref:MAT.6.15",
-              "cross_ref": "MAT.6.15"
+              "content": "",
+              "note": "Mark,chapter 11,verse 26,遇到特殊情境，爬蟲實作邏輯在此處留下空字串"
             },
             {
               "verse_sort": 27,
@@ -106180,9 +106176,8 @@
             },
             {
               "verse_sort": 28,
-              "content": "It is written: ‘And he was numbered with the transgressors’; and I tell you that this must be fulfilled in me. Yes, what is written about me is reaching its fulfillment.”",
-              "note": "ref:LUK.22.37",
-              "cross_ref": "LUK.22.37"
+              "content": "",
+              "note": "Mark,chapter 15,verse 28,遇到特殊情境，爬蟲實作邏輯在此處留下空字串"
             },
             {
               "verse_sort": 29,
@@ -109692,9 +109687,8 @@
             },
             {
               "verse_sort": 36,
-              "content": "Two men will be in the field; one will be taken and the other left.",
-              "note": "ref:MAT.24.40",
-              "cross_ref": "MAT.24.40"
+              "content": "",
+              "note": "Luke,chapter 17,verse 36,遇到特殊情境，爬蟲實作邏輯在此處留下空字串"
             },
             {
               "verse_sort": 37,
@@ -110809,9 +110803,8 @@
             },
             {
               "verse_sort": 17,
-              "content": "Now it was the governor’s custom at the festival to release a prisoner chosen by the crowd.",
-              "note": "ref:MAT.27.15",
-              "cross_ref": "MAT.27.15"
+              "content": "",
+              "note": "Luke,chapter 23,verse 17,遇到特殊情境，爬蟲實作邏輯在此處留下空字串"
             },
             {
               "verse_sort": 18,
@@ -111917,8 +111910,8 @@
             },
             {
               "verse_sort": 4,
-              "content": "Some manuscripts include here, wholly or in part, paralyzed—and they waited for the moving of the waters. 4 From time to time an angel of the Lord would come down and stir up the waters. The first one into the pool after each such disturbance would be cured of whatever disease they had.",
-              "note": "omitted"
+              "content": "",
+              "note": "John,chapter 5,verse 4,遇到特殊情境，爬蟲實作邏輯在此處留下空字串"
             },
             {
               "verse_sort": 5,
@@ -116118,8 +116111,8 @@
             },
             {
               "verse_sort": 37,
-              "content": "Some manuscripts include here Philip said, “If you believe with all your heart, you may.” The eunuch answered, “I believe that Jesus Christ is the Son of God.”",
-              "note": "omitted"
+              "content": "",
+              "note": "Acts,chapter 8,verse 37,遇到特殊情境，爬蟲實作邏輯在此處留下空字串"
             },
             {
               "verse_sort": 38,
@@ -117224,8 +117217,8 @@
             },
             {
               "verse_sort": 34,
-              "content": "Some manuscripts include here But Silas decided to remain there.",
-              "note": "omitted"
+              "content": "",
+              "note": "Acts,chapter 15,verse 34,遇到特殊情境，爬蟲實作邏輯在此處留下空字串"
             },
             {
               "verse_sort": 35,
@@ -118494,8 +118487,8 @@
             },
             {
               "verse_sort": 7,
-              "content": "Some manuscripts include here him, and we would have judged him in accordance with our law. 7 But the commander Lysias came and took him from us with much violence, 8 ordering his accusers to come before you.",
-              "note": "omitted"
+              "content": "",
+              "note": "Acts,chapter 24,verse 7,遇到特殊情境，爬蟲實作邏輯在此處留下空字串"
             },
             {
               "verse_sort": 8,
@@ -119132,8 +119125,8 @@
             },
             {
               "verse_sort": 29,
-              "content": "Some manuscripts include here After he said this, the Jews left, arguing vigorously among themselves.",
-              "note": "omitted"
+              "content": "",
+              "note": "Acts,chapter 28,verse 29,遇到特殊情境，爬蟲實作邏輯在此處留下空字串"
             },
             {
               "verse_sort": 30,
@@ -120982,8 +120975,8 @@
             },
             {
               "verse_sort": 24,
-              "content": "Some manuscripts include here May the grace of our Lord Jesus Christ be with all of you. Amen.",
-              "note": "omitted"
+              "content": "",
+              "note": "Romans,chapter 16,verse 24,遇到特殊情境，爬蟲實作邏輯在此處留下空字串"
             },
             {
               "verse_sort": 25,

@@ -56,6 +56,16 @@ type BookMeta struct {
 // NewBibleScraper initializes a Colly collector with settings from cfg and
 // attaches the Bible spec. bibleSpec must have been populated by cmd/spec-builder
 // before this is called.
+//
+// Parameters:
+//   - repo:      initialized BibleRepository backed by an open DB handle.
+//   - bibleSpec: loaded spec with matching ZH and EN book slices; must not be
+//     nil. The caller should assert len(ZH)==len(EN) before passing it in.
+//   - cfg:       application config; SourceDomain, CrawlerParallelism,
+//     CrawlerDelayMS, and CrawlerRandomDelayMS are all consumed here.
+//
+// Returns:
+//   - *BibleScraper fully configured and ready to call Run.
 func NewBibleScraper(repo *repository.BibleRepository, bibleSpec *spec.BibleSpec, cfg *config.Config) *BibleScraper {
 	c := colly.NewCollector(
 		// Restrict crawling to the configured source domain so accidental
@@ -155,7 +165,21 @@ type chapterContext struct {
 	maxVerses int // spec verse count for this book+chapter+language
 }
 
-// parseChapterContext validates all Colly context values before any DB writes.
+// parseChapterContext validates and converts all Colly context key-value strings
+// set by crawlChapters into typed fields. Validation happens before any DB
+// writes so that a corrupted context (e.g. from a Colly version mismatch that
+// silently drops values) cannot produce a partial or misattributed chapter row.
+//
+// Parameters:
+//   - ctx: Colly request context populated just before the HTTP request is
+//     queued. Expected keys: "bookID" (UUID string), "bookIndex" (int),
+//     "chapSort" (positive int), "lang" ("chinese"|"english"), "maxVerses"
+//     (positive int).
+//
+// Returns:
+//   - chapterContext: fully typed, bounds-checked fields ready for repository calls.
+//   - error: describes the first invalid field; the OnResponse handler logs
+//     and skips the page when this is non-nil, preventing silent data loss.
 func parseChapterContext(ctx *colly.Context) (chapterContext, error) {
 	rawBookID := strings.TrimSpace(ctx.Get("bookID"))
 	if rawBookID == "" {
@@ -223,8 +247,10 @@ func (s *BibleScraper) crawlChapters(books []BookMeta) {
 
 		chapID, err := s.Repo.GetOrCreateChapter(cc.bookID, cc.chapSort)
 		if err != nil {
-			log.Printf("DB error creating chapter (bookID=%s chap=%d): %v",
-				cc.bookID, cc.chapSort, err)
+			// Do not log err directly — PostgreSQL error strings may expose table
+			// names, constraint names, or column values (CWE-209, A09:2021).
+			log.Printf("DB error creating chapter (bookID=%s chap=%d): internal DB error",
+				cc.bookID, cc.chapSort)
 			return
 		}
 
@@ -236,8 +262,9 @@ func (s *BibleScraper) crawlChapters(books []BookMeta) {
 		// internal/youversion/titles.go, so rows from both crawlers share the same
 		// chapter title format and can be joined by title text in downstream queries.
 		if err = s.Repo.UpsertChapterContent(chapID, cc.lang, chapTitle); err != nil {
-			log.Printf("DB error saving chapter content (chapID=%s lang=%s): %v",
-				chapID, cc.lang, err)
+			// Do not log err directly — PostgreSQL error strings may expose schema info.
+			log.Printf("DB error saving chapter content (chapID=%s lang=%s): internal DB error",
+				chapID, cc.lang)
 		}
 
 		doc, err := goquery.NewDocumentFromReader(strings.NewReader(body))
@@ -254,6 +281,19 @@ func (s *BibleScraper) crawlChapters(books []BookMeta) {
 		// page; no other semantic HTML is used for individual verses.
 		// Removing script/style/a tags beforehand prevents their text content from
 		// being treated as verse prose during the subsequent .Text() calls.
+		// savedVerseNums tracks verse numbers for which actual text content was
+		// successfully submitted to saveVerse.  seenContentNums tracks verse
+		// numbers that had non-empty text content on the page, regardless of
+		// whether the saveVerse call succeeded.  The gap-filling loop uses
+		// savedVerseNums to cover two distinct cases:
+		//   (1) <li> completely absent from HTML (verse omitted in this translation)
+		//   (2) <li> present but contains only icon/image elements with no text
+		//       (e.g. English BBE bracket-verse icon for a disputed verse)
+		// seenContentNums prevents the gap-fill from creating a misleading ""
+		// row for a verse that had real content but whose saveVerse call failed —
+		// on the next crawl run the save will be retried with the actual prose.
+		savedVerseNums := make(map[int]bool, cc.maxVerses)
+		seenContentNums := make(map[int]bool, cc.maxVerses)
 		foundVerses := 0
 		doc.Find("ol li").Each(func(i int, sel *goquery.Selection) {
 			verseNum := i + 1
@@ -276,16 +316,53 @@ func (s *BibleScraper) crawlChapters(books []BookMeta) {
 
 			content := utils.CleanText(sel.Text())
 			if content == "" {
+				// <li> exists but has no text content (icon-only HTML elements
+				// such as bracket-verse markers in English BBE, or a whitespace-
+				// only node). Leave it for the gap-filling loop so that an empty-
+				// string content row is written, matching the behaviour for verses
+				// that are absent from the HTML entirely.
 				return
 			}
+
+			// Mark this verse as having real content regardless of whether the
+			// DB write succeeds.  If saveVerse fails, the gap-fill will not
+			// overwrite this verse with "" — the next crawl run retries it.
+			seenContentNums[verseNum] = true
 
 			if saveErr := s.saveVerse(cc.bookID, chapID, verseNum, cc.lang, content); saveErr != nil {
 				log.Printf("Failed to save verse (book=%d chap=%d verse=%d lang=%s): %v",
 					cc.bookIndex+1, cc.chapSort, verseNum, cc.lang, saveErr)
 				return
 			}
+			savedVerseNums[verseNum] = true
 			foundVerses++
 		})
+
+		// Gap-fill: save "" for every verse in 1..maxVerses that was not saved
+		// with actual text content.  Two cases are covered:
+		//   (1) <li> completely absent from HTML — verse intentionally omitted
+		//       from this translation (e.g. CUV Matthew 18:11, Acts 8:37).
+		//   (2) <li> present in HTML but contains only icon/image elements — the
+		//       verse is marked as disputed via a bracket icon rather than prose
+		//       (e.g. English BBE springbible pages for contested verses).
+		// Verses in seenContentNums are skipped: those had real prose but the
+		// DB write failed; the next crawl run will retry them correctly.
+		// Storing an empty content string ensures the bible_section_contents row
+		// exists so downstream consumers can distinguish "not yet crawled" from
+		// "intentionally absent". These rows are flagged in bible_books_*.json
+		// under the empty_verses annotation for manual review.
+		for v := 1; v <= cc.maxVerses; v++ {
+			if savedVerseNums[v] || seenContentNums[v] {
+				continue
+			}
+			if saveErr := s.saveVerse(cc.bookID, chapID, v, cc.lang, ""); saveErr != nil {
+				log.Printf("Failed to record absent verse (book=%d chap=%d verse=%d lang=%s): %v",
+					cc.bookIndex+1, cc.chapSort, v, cc.lang, saveErr)
+			} else {
+				log.Printf("Absent verse recorded with empty content (book=%d chap=%d verse=%d lang=%s) — intentionally omitted from source",
+					cc.bookIndex+1, cc.chapSort, v, cc.lang)
+			}
+		}
 
 		if foundVerses == 0 {
 			log.Printf("Warning: no verses found (book=%d chap=%d lang=%s)",
@@ -351,15 +428,13 @@ func (s *BibleScraper) crawlChapters(books []BookMeta) {
 }
 
 // saveVerse persists one verse's structural row and localized content.
+// content may be an empty string for textually-disputed verses intentionally
+// absent from the source translation (e.g. CUV Matthew 18:11, Acts 8:37).
 func (s *BibleScraper) saveVerse(bookID, chapID uuid.UUID, verseNum int, lang, content string) error {
 	if verseNum <= 0 {
 		return fmt.Errorf("invalid verse number %d", verseNum)
 	}
 	normalizedContent := utils.CleanText(content)
-	if normalizedContent == "" {
-		return fmt.Errorf("empty verse content")
-	}
-
 	// Verse title templates mirror FormatVerseTitle in internal/youversion/titles.go.
 	// Keeping both crawlers in sync ensures cross-pipeline title comparisons work.
 	verseTitle := fmt.Sprintf("第%d節", verseNum)

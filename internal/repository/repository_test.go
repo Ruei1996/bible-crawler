@@ -626,10 +626,21 @@ func TestUpsertSectionContent_EmptyTitle(t *testing.T) {
 }
 
 func TestUpsertSectionContent_EmptyContent(t *testing.T) {
-	sqlxDB, _ := newMockDB(t)
+	sqlxDB, mock := newMockDB(t)
 	repo := repository.NewBibleRepository(sqlxDB)
-	err := repo.UpsertSectionContent(uuid.New(), "english", "Title", "   ")
-	require.Error(t, err)
+
+	// Empty (whitespace-only) content is valid for textually-disputed verses
+	// intentionally absent from the source translation.  The row must be
+	// inserted with content = '' and no error returned.
+	secID := uuid.New()
+	mock.ExpectQuery(qre(sqlSelectSectionContent)).
+		WillReturnRows(sqlmock.NewRows([]string{"title", "content", "sub_title"}))
+	mock.ExpectExec(qre(sqlInsertSectionContent)).
+		WillReturnResult(sqlmock.NewResult(1, 1))
+
+	err := repo.UpsertSectionContent(secID, "english", "verse 1", "   ")
+	require.NoError(t, err, "empty/whitespace content must be accepted")
+	assert.NoError(t, mock.ExpectationsWereMet())
 }
 
 func TestUpsertSectionContent_QueryError(t *testing.T) {

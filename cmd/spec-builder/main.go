@@ -476,7 +476,26 @@ func writeZHSpec(path string, counts [][]int) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, raw, 0644)
+	// Guard against path traversal (CWE-22): reject any path that resolves
+	// outside the process working directory. This mirrors the protection in
+	// biblecom/scraper.go::writeJSON.
+	cleaned, absErr := filepath.Abs(filepath.Clean(path))
+	if absErr != nil {
+		return fmt.Errorf("writeZHSpec: resolve path %q: %w", path, absErr)
+	}
+	cwd, cwdErr := os.Getwd()
+	if cwdErr != nil {
+		return fmt.Errorf("writeZHSpec: get cwd: %w", cwdErr)
+	}
+	cwdAbs, cwdErr := filepath.EvalSymlinks(cwd)
+	if cwdErr != nil {
+		return fmt.Errorf("writeZHSpec: eval cwd symlinks: %w", cwdErr)
+	}
+	rel, relErr := filepath.Rel(cwdAbs, cleaned)
+	if relErr != nil || !filepath.IsLocal(rel) {
+		return fmt.Errorf("writeZHSpec: output path %q is outside working directory", path)
+	}
+	return os.WriteFile(cleaned, raw, 0644)
 }
 
 // writeENSpec builds and writes bible_books_en.json.
@@ -506,5 +525,24 @@ func writeENSpec(path string, counts [][]int) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, raw, 0644)
+	// Guard against path traversal (CWE-22): reject any path that resolves
+	// outside the process working directory. This mirrors the protection in
+	// biblecom/scraper.go::writeJSON.
+	cleaned, absErr := filepath.Abs(filepath.Clean(path))
+	if absErr != nil {
+		return fmt.Errorf("writeENSpec: resolve path %q: %w", path, absErr)
+	}
+	cwd, cwdErr := os.Getwd()
+	if cwdErr != nil {
+		return fmt.Errorf("writeENSpec: get cwd: %w", cwdErr)
+	}
+	cwdAbs, cwdErr := filepath.EvalSymlinks(cwd)
+	if cwdErr != nil {
+		return fmt.Errorf("writeENSpec: eval cwd symlinks: %w", cwdErr)
+	}
+	rel, relErr := filepath.Rel(cwdAbs, cleaned)
+	if relErr != nil || !filepath.IsLocal(rel) {
+		return fmt.Errorf("writeENSpec: output path %q is outside working directory", path)
+	}
+	return os.WriteFile(cleaned, raw, 0644)
 }

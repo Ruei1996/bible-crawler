@@ -1332,6 +1332,10 @@
         "26-[75]": 75,
         "27-[66]": 66,
         "28-[20]": 20
+      },
+      "empty_verses": {
+        "18:11": "Absent from BBE (textually disputed; most manuscripts omit — 'The Son of Man is come to save that which was lost')",
+        "23:14": "Absent from BBE (textually disputed; scribal addition found in some manuscripts)"
       }
     },
     {
@@ -1357,6 +1361,10 @@
         "14-[72]": 72,
         "15-[47]": 47,
         "16-[20]": 20
+      },
+      "empty_verses": {
+        "7:16": "Absent from BBE (textually disputed; 'If any man has ears, let him give ear')",
+        "15:28": "Absent from BBE (textually disputed; fulfilled-prophecy insertion)"
       }
     },
     {
@@ -1390,6 +1398,10 @@
         "22-[71]": 71,
         "23-[56]": 56,
         "24-[53]": 53
+      },
+      "empty_verses": {
+        "17:36": "Absent from BBE (textually disputed; 'Two men will be in the field; one will be taken and the other left')",
+        "23:17": "Absent from BBE (textually disputed; Pilate's custom to release one prisoner)"
       }
     },
     {
@@ -1420,6 +1432,9 @@
         "19-[42]": 42,
         "20-[31]": 31,
         "21-[25]": 25
+      },
+      "empty_verses": {
+        "5:4": "Absent from BBE (textually disputed; angel troubling the water at Bethesda)"
       }
     },
     {
@@ -1457,6 +1472,12 @@
         "26-[32]": 32,
         "27-[44]": 44,
         "28-[31]": 31
+      },
+      "empty_verses": {
+        "8:37": "Absent from BBE (textually disputed; Philip's question about faith before baptism)",
+        "15:34": "Absent from BBE (textually disputed; Silas remained at Antioch)",
+        "24:7": "Absent from BBE (textually disputed; Lysias the chief captain verse)",
+        "28:29": "Absent from BBE (textually disputed; Jews departed with great reasoning)"
       }
     },
     {

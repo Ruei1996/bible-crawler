@@ -136,13 +136,14 @@ const mergedVerseContent = "併於上節。"
 //   - Bracket-labeled verses ([N]) whose span contains only a __note element
 //     and no prose — e.g. NIV Matthew 17:21 — are resolved as follows:
 //     (a) If the __note contains a <span class="ref" data-usfm="BOOK.CHAP.V">
-//         cross-reference, Content is left empty and CrossRef is set; the
-//         caller's resolveRefs pass fills in the actual verse text after all
-//         chapters are crawled.
+//         cross-reference, Content is left empty and CrossRef is set to the
+//         referenced USFM for JSON auditability. The scraper's processItem
+//         post-processing step blanks these to content="" with a human-readable
+//         note — disputed verses always have empty content in the final output.
 //     (b) If no cross-reference span is found, the footnote body text is
 //         extracted from the __note and stored directly as the verse content.
-//     In both cases Note is set ("ref:BOOK.CHAP.V" or "omitted") and the DB
-//     repository always receives non-empty content.
+//     In both cases Note is set ("ref:BOOK.CHAP.V" or "omitted") and
+//     processItem normalises both to content="" before JSON serialisation.
 //   - Whitespace-only content spans (e.g. the indent-spacer span that bible.com
 //     emits after a bracket verse) are detected via strings.TrimSpace and skipped
 //     unless they are the sole occurrence of a bracket verse.
@@ -182,11 +183,12 @@ func ParseChapter(rawHTML string, bookUSFM string, chapNum int) ([]VerseOutput, 
 	// divs; fragments are joined with a single space during the assembly step.
 	// merged=true marks a secondary verse in a merged-verse group (content is
 	// always mergedVerseContent for these entries; note is set in the output).
-	// omitted=true marks a bracket-labeled verse: content may be empty pending
-	// resolveRefs (when refUSFM is set) or equal to the footnote body text
-	// (when no specific cross-reference is found in the __note).
+	// omitted=true marks a bracket-labeled verse: content may be empty (when
+	// refUSFM is set) or equal to the footnote body text (when no specific
+	// cross-reference is found in the __note). In both cases processItem in
+	// the scraper will override content to "" before JSON serialisation.
 	// refUSFM holds the USFM key of the cross-referenced verse (e.g. "MRK.9.29")
-	// so that resolveRefs can look it up and fill in the actual verse content.
+	// for JSON auditability; it is also stored in CrossRef on the output verse.
 	type verseEntry struct {
 		sort      int
 		subTitle  string
@@ -381,10 +383,9 @@ func ParseChapter(rawHTML string, bookUSFM string, chapNum int) ([]VerseOutput, 
 					}
 					crossRef = extractCrossRef(verseSel)
 					if crossRef != "" {
-						// Cross-reference found: leave content empty so
-						// resolveRefs (called in scraper.RunWithContext after
-						// all chapters are crawled) can look up the target
-						// verse and fill in the actual prose.
+						// Cross-reference found: leave content empty. The scraper's
+						// processItem post-processing step will blank this to ""
+						// and replace the note with a human-readable annotation.
 						content = ""
 					} else {
 						// No specific verse cross-reference in the __note:
@@ -395,9 +396,11 @@ func ParseChapter(rawHTML string, bookUSFM string, chapNum int) ([]VerseOutput, 
 						// a specific verse.
 						content = extractNoteBodyText(verseSel)
 						if strings.TrimSpace(content) == "" {
-							// Final safety net: content must never be empty in
-							// the DB.  Use a brief neutral placeholder.
-							content = "[verse not in this translation]"
+							// No footnote text either: this is a fully disputed
+							// verse with no explanatory note.  Store empty string
+							// so the section_contents row exists and downstream
+							// consumers can identify it as intentionally absent.
+							content = ""
 						}
 					}
 					isBracket = true
@@ -496,9 +499,9 @@ func ParseChapter(rawHTML string, bookUSFM string, chapNum int) ([]VerseOutput, 
 		// and omitted.
 		switch {
 		case e.omitted && e.refUSFM != "":
-			// Bracket verse resolved via cross-reference: content is filled in
-			// by resolveRefs after this function returns.  CrossRef and Note
-			// both retain the source USFM for JSON auditability.
+			// Bracket verse resolved via cross-reference: content is "" here
+			// and will remain "" after processItem post-processing. CrossRef
+			// and Note both retain the source USFM for JSON auditability.
 			v.Note = "ref:" + e.refUSFM
 			v.CrossRef = e.refUSFM
 		case e.omitted:
@@ -598,8 +601,8 @@ func nodeAttr(n *html.Node, name string) string {
 //
 // When isBracketVerse returns true, the caller invokes extractCrossRef to
 // locate the specific verse being referenced, then either leaves Content
-// empty (to be resolved by resolveRefs) or calls extractNoteBodyText for
-// the fallback case.
+// empty (processItem will later overwrite it with "" and a human-readable
+// note) or calls extractNoteBodyText for the fallback case.
 //
 // Known NIV examples: Matthew 17:21, 18:11, 23:14; Mark 7:16, 9:44, 9:46,
 // 11:26, 15:28; Luke 17:36, 23:17; John 5:4; Acts 8:37, 15:34, 24:7, 28:29;
