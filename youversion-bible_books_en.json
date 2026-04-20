@@ -132124,6 +132124,11 @@
             {
               "verse_sort": 17,
               "content": "Then the dragon was enraged at the woman and went off to wage war against the rest of her offspring—those who keep God’s commands and hold fast their testimony about Jesus."
+            },
+            {
+              "verse_sort": 18,
+              "content": "",
+              "note": "Revelation,chapter 12,verse 18,遇到特殊情境，爬蟲實作邏輯在此處留下空字串"
             }
           ]
         },

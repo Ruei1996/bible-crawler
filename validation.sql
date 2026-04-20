@@ -18,26 +18,19 @@
 --   SECTION 10 — Bracket-verse spot-check: the 16 NIV textually-disputed verses
 --               that previously caused WARN/skipped; all must have non-empty
 --               English content after the cross-reference resolution fix
+--   SECTION 11 — Chinese empty verse summary (missing or blank ZH content;
+--               cross-checks EN to distinguish versification from crawl errors)
+--   SECTION 12 — Chinese empty verse detailed diagnostic (adds section_id for
+--               direct use in INSERT / UPDATE repair workflows)
+--   SECTION 13 — English empty verse summary (missing or blank EN content;
+--               cross-checks ZH to distinguish versification from crawl errors)
+--   SECTION 14 — English empty verse detailed diagnostic (adds section_id for
+--               direct use in INSERT / UPDATE repair workflows)
 --
 -- A fully loaded database returns:
 --   • 0 rows  in sections 1, 2, 3, 4, 5, 9, and all english_status = 'OK' in 10
 --   • missing_chinese = 0 and missing_english = 0 in section 0
 --   • chinese: 31,092 | english: 31,103 total_section_contents in section 8
--- ============================================================
-
-
--- ── SECTION 6 — Chapter content viewer (bilingual)
---
--- HOW TO USE:
---   1. Set @book_name  → Chinese (e.g. '創世記') OR English (e.g. 'Genesis')
---   2. Set @chapter_num → chapter number (e.g. 32)
---   3. Run the query — all verses in both languages appear, sorted correctly.
---
--- Sorting strategy:
---   • language: 'chinese' always comes before 'english'
---   • verse order: sorted by bible_sections.sort (integer), not by the title
---     string, because string-sorted "第10節" < "第2節" (ASCII order is wrong).
---     Integer sort gives the natural 1 → 2 → … → 60 order the user expects.
 -- ============================================================
 
 
@@ -115,7 +108,7 @@ ORDER BY bb.sort;
 
 SELECT
     bb.sort                                                         AS book_sort,
-    COALESCE(bbc_zh.title, '⚠ 缺書名')                             AS book_name_zh,
+    COALESCE(bbc_zh.title, '⚠ MISSING')                             AS book_name_zh,
     COALESCE(bbc_en.title, '⚠ MISSING')                            AS book_name_en,
     bc.sort                                                         AS chapter_sort,
     COALESCE(bcc_zh.title, '⚠ MISSING')                            AS chapter_title_zh,
@@ -146,7 +139,7 @@ ORDER BY bb.sort, bc.sort;
 
 SELECT
     bb.sort                                                         AS book_sort,
-    COALESCE(bbc_zh.title, '⚠ 缺書名')                             AS book_name_zh,
+    COALESCE(bbc_zh.title, '⚠ MISSING')                             AS book_name_zh,
     COALESCE(bbc_en.title, '⚠ MISSING')                            AS book_name_en,
     bc.sort                                                         AS chapter_sort,
     bs.sort                                                         AS section_sort,
@@ -312,7 +305,7 @@ ORDER BY bb.sort, bc.sort;
 -- Output columns:
 --   verse_num  — 1-based verse number (same for both languages)
 --   language   — 'chinese' | 'english'
---   title      — "第N節" or "verse N"
+--   title      — Chinese verse heading (e.g. "第N節") or English heading (e.g. "Verse N")
 --   content    — the actual verse text
 --   sub_title  — optional sub-heading (usually NULL)
 --
@@ -473,7 +466,7 @@ ORDER BY bsc.language;
 
 SELECT
     bb.sort                                                         AS book_sort,
-    COALESCE(bbc_zh.title, '⚠ 缺書名')                             AS book_name_zh,
+    COALESCE(bbc_zh.title, '⚠ MISSING')                             AS book_name_zh,
     COALESCE(bbc_en.title, '⚠ MISSING')                            AS book_name_en,
     bc.sort                                                         AS chapter_sort,
     bs.sort                                                         AS verse_sort,
@@ -527,7 +520,7 @@ WITH bracket_verses (book_sort, chapter_sort, verse_sort, resolution_method, cro
 )
 SELECT
     bv.book_sort,
-    COALESCE(bbc_zh.title, '⚠ 缺書名')                             AS book_name_zh,
+    COALESCE(bbc_zh.title, '⚠ MISSING')                             AS book_name_zh,
     COALESCE(bbc_en.title, '⚠ MISSING')                            AS book_name_en,
     bv.chapter_sort,
     bv.verse_sort,
@@ -557,40 +550,42 @@ LEFT JOIN bibles.bible_section_contents bsc_en
 ORDER BY bv.book_sort, bv.chapter_sort, bv.verse_sort;
 
 
--- ── SECTION 11: 中文空白小節查詢 ──────────────────────────────
--- 列出所有中文聖經內容缺失或空白的小節。
--- 兩種情況均涵蓋：
---   (A) bible_section_contents 資料列不存在（爬蟲未寫入）
---   (B) 資料列存在但 content 為 NULL 或純空白字元
+-- ── SECTION 11: Chinese empty verse summary ──────────────────
+-- Lists all Chinese Bible verses whose content is missing or empty.
+-- Two cases are covered:
+--   (A) No bible_section_contents row exists (crawler never wrote this verse)
+--   (B) The row exists but content is NULL or whitespace-only
 --
--- 備註欄判斷邏輯（交叉比對英文內容）：
---   ✅ EN 有內容 → 版次差異：英文來源有此節，中文（CUV）省略，屬正常現象
---   ⚠ EN 同樣缺少 → 兩種語言均無資料，可能是爬蟲錯誤，需調查
+-- Note column (cross-checks English content):
+--   ✅ EN has content → versification difference: EN source has this verse,
+--                        Chinese (CUV) omits it — expected, not an error
+--   ⚠ EN also missing → both languages absent, possible crawl error, investigate
 --
--- 輸出欄位：
---   語言       — 固定為 '中文'
---   書本名稱    — 中文書名（e.g. 使徒行傳）
---   章節名稱    — 中文章節標題（e.g. 第8章）
---   小節編號    — 小節的 sort 整數（1-based 節號）
---   小節內容    — 診斷說明（缺少資料列 / 內容為 NULL / 內容為空白）
---   備註        — 交叉比對英文狀態，區分版次差異與爬蟲錯誤
+-- Output columns:
+--   language      — always 'chinese'
+--   book_name     — Chinese book title (e.g. Acts / 使徒行傳)
+--   chapter_title — Chinese chapter heading (e.g. Chapter 8 / 第8章)
+--   verse_number  — 1-based verse sort integer
+--   verse_content — diagnostic note (missing row / NULL / blank)
+--   note          — cross-check against English to distinguish versification
+--                   difference from crawl error
 
 SELECT
-    '中文'                                                          AS 語言,
-    COALESCE(bbc_zh.title, '⚠ 缺書名')                             AS 書本名稱,
-    COALESCE(bcc_zh.title, '⚠ 缺章節名')                           AS 章節名稱,
-    bs.sort                                                         AS 小節編號,
+    'chinese'                                                       AS language,
+    COALESCE(bbc_zh.title, '⚠ MISSING')                            AS book_name,
+    COALESCE(bcc_zh.title, '⚠ MISSING')                            AS chapter_title,
+    bs.sort                                                         AS verse_number,
     CASE
-        WHEN bsc_zh.id IS NULL              THEN '（缺少資料列）'
-        WHEN bsc_zh.content IS NULL         THEN '（內容為 NULL）'
-        ELSE                                     '（內容為空白）'
-    END                                                             AS 小節內容,
+        WHEN bsc_zh.id IS NULL              THEN '(missing row)'
+        WHEN bsc_zh.content IS NULL         THEN '(content is NULL)'
+        ELSE                                     '(content is blank)'
+    END                                                             AS verse_content,
     CASE
         WHEN bsc_en.id IS NOT NULL
          AND TRIM(COALESCE(bsc_en.content, '')) != ''
-        THEN '✅ EN 有內容 → 版次差異（CUV 省略此節）'
-        ELSE '⚠ EN 同樣缺少 → 兩語言均無資料，請調查'
-    END                                                             AS 備註
+        THEN '✅ EN has content → versification difference (CUV omits this verse)'
+        ELSE '⚠ EN also missing → both languages absent, investigate'
+    END                                                             AS note
 FROM       bibles.bible_sections         bs
 JOIN       bibles.bible_chapters         bc
            ON bc.id           = bs.bible_chapter_id
@@ -609,52 +604,54 @@ WHERE bsc_zh.id IS NULL
 ORDER BY bb.sort, bc.sort, bs.sort;
 
 
--- ── SECTION 13: 中文空白小節詳細診斷查詢 ─────────────────────────
--- 目的
---   查詢所有中文聖經版本（language = 'chinese'）當中，content 缺失或為空白的小節。
---   與 SECTION 11 的差異在於：本查詢額外輸出書卷排序、章排序、section_id，
---   可直接用於 UPDATE / INSERT 修補作業，以及後續人工審查。
+-- ── SECTION 12: Chinese empty verse detailed diagnostic query ─
+-- Purpose
+--   Query all Chinese Bible version (language = 'chinese') verses whose
+--   content is missing or empty. Compared with SECTION 11, this query adds
+--   book_sort, chapter_sort, and section_id columns, making it suitable for
+--   direct use in UPDATE / INSERT remediation workflows and manual review.
 --
--- 涵蓋的兩種異常情況
---   (A) bible_section_contents 資料列不存在
---       → 問題類型顯示「❌ 完全缺少 contents 行」
---       → 爬蟲從未寫入此小節，需重爬或人工補值
---   (B) 資料列存在，但 content 欄位為 NULL 或純空白字元
---       → 問題類型顯示「⚠ content 欄位為 NULL」或「⚠ content 為空白字元」
---       → 屬於刻意留空的特殊小節（如：文本上有爭議之版次差異小節），
---         爬蟲依規則寫入空字串以保留 section 結構，未來可人工填入正確內容
+-- Two anomaly cases covered
+--   (A) No bible_section_contents row exists for the (section, 'chinese') pair
+--       → problem_type shows "❌ missing row entirely"
+--       → The crawler never wrote this verse; re-crawl or insert manually
+--   (B) The row exists but content is NULL or whitespace-only
+--       → problem_type shows "⚠ content is NULL" or "⚠ content is blank"
+--       → Intentionally empty for textually-disputed verses (versification
+--         differences); the crawler writes "" to preserve the section structure;
+--         may be filled in manually at a later date
 --
--- 欄位說明
---   書卷排序   — 書卷的全域排序（1 = 創世記 … 66 = 啟示錄）
---   書本名稱   — 中文書名（e.g. 使徒行傳）；無 contents 行時顯示 '⚠ 缺書名'
---   章排序     — 章在書卷內的排序（1-based）
---   章節名稱   — 中文章節標題（e.g. 第 8 章）；無 contents 行時顯示 '⚠ 缺章節名'
---   節號       — 小節在章節內的排序（1-based 節號）
---   section_id — bible_sections.id（UUID），可直接用於 INSERT / UPDATE
---   問題類型   — 三種診斷結果（見上方說明）
---   content    — 實際儲存的內容（NULL 或空字串）；可用於確認問題性質
+-- Column descriptions
+--   book_sort     — global canonical book order (1 = Genesis … 66 = Revelation)
+--   book_name     — Chinese book title (e.g. Acts / 使徒行傳); '⚠ MISSING' if no row
+--   chapter_sort  — 1-based chapter index within the book
+--   chapter_title — Chinese chapter heading (e.g. Chapter 8 / 第8章); '⚠ MISSING' if absent
+--   verse_number  — 1-based verse sort integer within the chapter
+--   section_id    — bible_sections.id (UUID), usable directly in INSERT / UPDATE
+--   problem_type  — one of three diagnostic labels (see above)
+--   content       — actual stored value (NULL or empty string) for confirmation
 --
--- 使用方式
---   1. 執行此查詢確認缺失小節清單
---   2. 針對「❌ 完全缺少 contents 行」的 section_id，以下方範本補值：
+-- How to use
+--   1. Run this query to identify the list of missing / blank verses
+--   2. For each section_id with "❌ missing row entirely", insert a placeholder:
 --        INSERT INTO bibles.bible_section_contents
 --          (bible_section_id, language, title, content)
---        VALUES ('<section_id>', 'chinese', '<第N節>', '')
+--        VALUES ('<section_id>', 'chinese', '<Chinese verse title, e.g. 第1節>', '')
 --        ON CONFLICT DO NOTHING;
---   3. 確認補值後重新執行本查詢，結果應僅剩「⚠ content 為空白字元」
+--   3. Re-run after remediation; only "⚠ content is blank" rows should remain
 
 SELECT
-    bb.sort                                                         AS 書卷排序,
-    COALESCE(bbc.title, '⚠ 缺書名')                                AS 書本名稱,
-    bc.sort                                                         AS 章排序,
-    COALESCE(bcc.title, '⚠ 缺章節名')                              AS 章節名稱,
-    bs.sort                                                         AS 節號,
+    bb.sort                                                         AS book_sort,
+    COALESCE(bbc.title, '⚠ MISSING')                               AS book_name,
+    bc.sort                                                         AS chapter_sort,
+    COALESCE(bcc.title, '⚠ MISSING')                               AS chapter_title,
+    bs.sort                                                         AS verse_number,
     bs.id                                                           AS section_id,
     CASE
-        WHEN bsc_zh.id IS NULL              THEN '❌ 完全缺少 contents 行'
-        WHEN bsc_zh.content IS NULL         THEN '⚠ content 欄位為 NULL'
-        ELSE                                     '⚠ content 為空白字元'
-    END                                                             AS 問題類型,
+        WHEN bsc_zh.id IS NULL              THEN '❌ missing row entirely'
+        WHEN bsc_zh.content IS NULL         THEN '⚠ content is NULL'
+        ELSE                                     '⚠ content is blank'
+    END                                                             AS problem_type,
     bsc_zh.content
 FROM       bibles.bible_sections         bs
 JOIN       bibles.bible_chapters         bc
@@ -672,10 +669,64 @@ WHERE bsc_zh.id IS NULL
 ORDER BY bb.sort, bc.sort, bs.sort;
 
 
+-- ── SECTION 13: English empty verse summary ──────────────────
+-- Lists all English Bible verses whose content is missing or empty.
+-- Two cases are covered:
+--   (A) No bible_section_contents row exists for this (section, 'english') pair
+--   (B) The row exists but content is NULL or whitespace-only
+--
+-- Note column (cross-checks Chinese content):
+--   ✅ ZH has content → versification difference: Chinese source has this verse,
+--                        English translation omits it — expected, not an error
+--   ⚠ ZH also missing → both languages absent, possible crawl error, investigate
+--
+-- Output columns:
+--   language      — always 'english'
+--   book_name     — English book title (e.g. Revelation)
+--   chapter_title — English chapter title (e.g. Chapter 12)
+--   verse_number  — 1-based verse sort integer
+--   verse_content — diagnostic note (missing row / NULL / blank)
+--   note          — cross-check against Chinese to distinguish versification
+--                   difference from crawl error
+
+SELECT
+    'english'                                                       AS language,
+    COALESCE(bbc_en.title, '⚠ MISSING')                            AS book_name,
+    COALESCE(bcc_en.title, '⚠ MISSING')                            AS chapter_title,
+    bs.sort                                                         AS verse_number,
+    CASE
+        WHEN bsc_en.id IS NULL              THEN '(missing row)'
+        WHEN bsc_en.content IS NULL         THEN '(content is NULL)'
+        ELSE                                     '(content is blank)'
+    END                                                             AS verse_content,
+    CASE
+        WHEN bsc_zh.id IS NOT NULL
+         AND TRIM(COALESCE(bsc_zh.content, '')) != ''
+        THEN '✅ ZH has content → versification difference (EN omits this verse)'
+        ELSE '⚠ ZH also missing → both languages absent, investigate'
+    END                                                             AS note
+FROM       bibles.bible_sections         bs
+JOIN       bibles.bible_chapters         bc
+           ON bc.id           = bs.bible_chapter_id
+JOIN       bibles.bible_books            bb
+           ON bb.id           = bc.bible_book_id
+LEFT JOIN  bibles.bible_book_contents    bbc_en
+           ON bbc_en.bible_book_id       = bb.id AND bbc_en.language = 'english'
+LEFT JOIN  bibles.bible_chapter_contents bcc_en
+           ON bcc_en.bible_chapter_id    = bc.id AND bcc_en.language = 'english'
+LEFT JOIN  bibles.bible_section_contents bsc_en
+           ON bsc_en.bible_section_id    = bs.id AND bsc_en.language = 'english'
+LEFT JOIN  bibles.bible_section_contents bsc_zh
+           ON bsc_zh.bible_section_id    = bs.id AND bsc_zh.language = 'chinese'
+WHERE bsc_en.id IS NULL
+   OR TRIM(COALESCE(bsc_en.content, '')) = ''
+ORDER BY bb.sort, bc.sort, bs.sort;
+
+
 -- ── SECTION 14: English empty verse detailed diagnostic query ─
 -- Purpose
 --   Query all English Bible version (language = 'english') verses whose
---   content is missing or empty. Compared with SECTION 12, this query adds
+--   content is missing or empty. Compared with SECTION 13, this query adds
 --   book_sort, chapter_sort, and section_id columns, making it suitable for
 --   direct use in UPDATE / INSERT remediation workflows and manual review.
 --
@@ -732,60 +783,6 @@ LEFT JOIN  bibles.bible_chapter_contents bcc
            ON bcc.bible_chapter_id       = bc.id AND bcc.language = 'english'
 LEFT JOIN  bibles.bible_section_contents bsc_en
            ON bsc_en.bible_section_id    = bs.id AND bsc_en.language = 'english'
-WHERE bsc_en.id IS NULL
-   OR TRIM(COALESCE(bsc_en.content, '')) = ''
-ORDER BY bb.sort, bc.sort, bs.sort;
-
-
--- ── SECTION 12: English empty verse query ────────────────────
--- Lists all English Bible verses whose content is missing or empty.
--- Two cases are covered:
---   (A) No bible_section_contents row exists for this (section, 'english') pair
---   (B) The row exists but content is NULL or whitespace-only
---
--- Note column (cross-checks Chinese content):
---   ✅ ZH has content → versification difference: Chinese source has this verse,
---                        English translation omits it — expected, not an error
---   ⚠ ZH also missing → both languages absent, possible crawl error, investigate
---
--- Output columns:
---   language      — always 'english'
---   book_name     — English book title (e.g. Revelation)
---   chapter_title — English chapter title (e.g. Chapter 12)
---   verse_number  — 1-based verse sort integer
---   verse_content — diagnostic note (missing row / NULL / blank)
---   note          — cross-check against Chinese to distinguish versification
---                   difference from crawl error
-
-SELECT
-    'english'                                                       AS language,
-    COALESCE(bbc_en.title, '⚠ MISSING')                            AS book_name,
-    COALESCE(bcc_en.title, '⚠ MISSING')                            AS chapter_title,
-    bs.sort                                                         AS verse_number,
-    CASE
-        WHEN bsc_en.id IS NULL              THEN '(missing row)'
-        WHEN bsc_en.content IS NULL         THEN '(content is NULL)'
-        ELSE                                     '(content is blank)'
-    END                                                             AS verse_content,
-    CASE
-        WHEN bsc_zh.id IS NOT NULL
-         AND TRIM(COALESCE(bsc_zh.content, '')) != ''
-        THEN '✅ ZH has content → versification difference (EN omits this verse)'
-        ELSE '⚠ ZH also missing → both languages absent, investigate'
-    END                                                             AS note
-FROM       bibles.bible_sections         bs
-JOIN       bibles.bible_chapters         bc
-           ON bc.id           = bs.bible_chapter_id
-JOIN       bibles.bible_books            bb
-           ON bb.id           = bc.bible_book_id
-LEFT JOIN  bibles.bible_book_contents    bbc_en
-           ON bbc_en.bible_book_id       = bb.id AND bbc_en.language = 'english'
-LEFT JOIN  bibles.bible_chapter_contents bcc_en
-           ON bcc_en.bible_chapter_id    = bc.id AND bcc_en.language = 'english'
-LEFT JOIN  bibles.bible_section_contents bsc_en
-           ON bsc_en.bible_section_id    = bs.id AND bsc_en.language = 'english'
-LEFT JOIN  bibles.bible_section_contents bsc_zh
-           ON bsc_zh.bible_section_id    = bs.id AND bsc_zh.language = 'chinese'
 WHERE bsc_en.id IS NULL
    OR TRIM(COALESCE(bsc_en.content, '')) = ''
 ORDER BY bb.sort, bc.sort, bs.sort;
