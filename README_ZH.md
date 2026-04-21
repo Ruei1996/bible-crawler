@@ -780,19 +780,19 @@ A：YouVersion 爬蟲**只支援平行模式**，`YOUVERSION_CHECKPOINT_FILE` �
 **Q：Bible.com 爬蟲啟動時出現設定錯誤**  
 A：爬蟲啟動時會驗證 URL（必須為 `https://www.bible.com/…`）和數值範圍（workers 1–50、RPS 0.1–20、timeout 5–120 秒）。`.env.example` 已提供所有欄位的合理預設值。
 
-**Q: bible.com crawler output is missing a book — e.g. Jude never appears in the JSON.**  
-A: A silently-missing book almost always means its USFM code in `internal/biblecom/books.go` does not match what bible.com uses in its page URLs. Historically, Jude (sort=65) was catalogued as `"JDE"` instead of the correct `"JUD"` — every request returned HTTP 404, and the book was silently dropped. **This has been fixed.** The scraper now logs a `WARN` line for every in-scope book that yields no chapters, including the USFM code, making future mismatches immediately visible. If you have JSON files produced before this fix, simply re-run `cmd/biblecom-crawler` to regenerate them.
+**Q：bible.com 爬蟲輸出缺少某本書 — 例如猶大書完全未出現在 JSON 中**  
+A：靜默缺書幾乎都是因為 `internal/biblecom/books.go` 中的 USFM 代碼與 bible.com 頁面 URL 使用的代碼不符。歷史上猶大書（sort=65）曾被錯誤登錄為 `"JDE"` 而非正確的 `"JUD"`，導致每次請求都回傳 HTTP 404 並被靜默略過。**此問題已修正。** 爬蟲現在對每本範圍內卻未爬到任何章節的書籍輸出一行 `WARN` 日誌（含 USFM 代碼），讓未來的代碼不符問題立即可見。若您的 JSON 檔是修正前產生的，請重新執行 `cmd/biblecom-crawler` 重新產生。
 
-**Q: How do I re-crawl only one book without re-fetching all 66?**  
-A: Use the `BIBLECOM_FILTER_SORTS` env var set to the book's canonical sort number (1–66):
+**Q：如何只重新爬取單本書，而不重新抓取全部 66 本？**  
+A：將 `BIBLECOM_FILTER_SORTS` 環境變數設為該書的標準排序編號（1–66）：
 
 ```bash
-# Re-crawl only Jude (sort=65) — leaves the other 65 books untouched in the DB:
+# 只重新爬取猶大書（sort=65），不影響其他 65 本書的資料庫資料：
 BIBLECOM_FILTER_SORTS=65 go run cmd/biblecom-crawler/main.go
 go run cmd/biblecom-importer/main.go
 ```
 
-The scraper logs `[biblecom] Book filter active — crawling only sorts: [65]` to confirm. The output JSON contains only the filtered books; the importer is fully idempotent and only updates rows present in the JSON.
+篩選器啟用時，爬蟲會輸出 `[biblecom] Book filter active — crawling only sorts: [65]` 加以確認。輸出 JSON 只包含篩選的書；匯入工具完全冪等，只更新 JSON 中存在的書籍資料列。
 
 **Q：`bible_books_zh.json` 與 `bible_books_en.json` 節數完全相同**  
 A：請重新執行 `cmd/spec-builder/main.go`。規格檔必須從網站即時抓取才能正確反映兩語言的版本差異。
