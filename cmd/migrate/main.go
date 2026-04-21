@@ -60,13 +60,42 @@ func main() {
 	}
 }
 
-// runBackup captures stable (book_sort, chapter_sort, section_sort) coordinates
-// for every cross-schema bible reference into the bibles._orphan_refs_backup table.
+// runBackup first runs a pre-check to detect references that are already broken
+// before the migration starts, then captures stable (book_sort, chapter_sort,
+// section_sort) coordinates for every valid cross-schema bible reference into
+// the bibles._orphan_refs_backup table.
 // When withTruncate is true it also cascades a TRUNCATE on bibles.bible_books
 // immediately after the backup, clearing all six bibles schema tables in one
 // statement so the operator can proceed directly to re-crawling.
 func runBackup(db *sqlx.DB, withTruncate bool) {
-	log.Println("Phase: backup — capturing cross-schema bible references...")
+	log.Println("Phase: backup — pre-checking for stale cross-schema references...")
+
+	precheck, err := migration.PreCheck(db)
+	if err != nil {
+		log.Fatalf("Pre-check failed: %v", err)
+	}
+	log.Printf("Pre-check result (already-broken references before this migration):")
+	log.Printf("  activities.general_bibles:          %d rows", precheck.GeneralBibles)
+	log.Printf("  activities.general_template_bibles: %d rows", precheck.GeneralTemplateBibles)
+	log.Printf("  devotions.devotion_bibles:           %d rows", precheck.DevotionBibles)
+	log.Printf("  Total:                               %d rows", precheck.Total)
+
+	if precheck.Total > 0 {
+		log.Printf("WARNING: %d reference(s) are ALREADY broken and cannot be recovered by this migration.", precheck.Total)
+		log.Printf("  These rows point to bibles.bible_sections UUIDs that no longer exist.")
+		log.Printf("  Root cause: a previous re-crawl ran without this migration tool,")
+		log.Printf("  or the rows were copied from a different environment with different bibles UUIDs.")
+		log.Printf("  After restore, the orphan-check will still report these rows.")
+		log.Printf("  Remedies (apply BEFORE or AFTER this migration):")
+		log.Printf("    1. DELETE the stale rows if they are no longer needed:")
+		log.Printf("       DELETE FROM <table> WHERE NOT EXISTS")
+		log.Printf("         (SELECT 1 FROM bibles.bible_sections WHERE id = <bible_section_col>);")
+		log.Printf("    2. Look up (book_sort, chapter_sort, section_sort) for each stale UUID")
+		log.Printf("       from another environment (e.g. production) and re-point them manually.")
+		log.Printf("  Continuing backup for the remaining valid references...")
+	}
+
+	log.Println("Capturing valid cross-schema bible references...")
 
 	result, err := migration.Backup(db)
 	if err != nil {

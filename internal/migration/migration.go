@@ -49,6 +49,17 @@ type OrphanResult struct {
 	Total                 int
 }
 
+// PreCheckResult holds counts of rows in cross-schema tables that ALREADY
+// reference non-existent bibles.bible_sections before the backup starts.
+// Non-zero counts mean those rows were broken before this migration cycle
+// and cannot be recovered by backup/restore.
+type PreCheckResult struct {
+	GeneralBibles         int
+	GeneralTemplateBibles int
+	DevotionBibles        int
+	Total                 int
+}
+
 // ── SQL constants ─────────────────────────────────────────────────────────────
 
 // sqlCreateBackupTable creates the temporary holding table for cross-schema
@@ -153,7 +164,50 @@ JOIN   bibles.bible_sections new_bs ON new_bs.bible_book_id = new_bb.id
 WHERE  bkp.source_table = 'devotion_bibles'
   AND  db.id = bkp.source_id`
 
+// sqlCountOrphanGeneralBibles counts activities.general_bibles rows whose bible_id
+// has no matching row in bibles.bible_sections. Shared by PreCheck and Verify.
+const sqlCountOrphanGeneralBibles = `SELECT count(*) FROM activities.general_bibles gb WHERE NOT EXISTS (SELECT 1 FROM bibles.bible_sections bs WHERE bs.id = gb.bible_id)`
+
+// sqlCountOrphanGeneralTplBibles counts activities.general_template_bibles rows whose
+// bible_id has no matching row in bibles.bible_sections. Shared by PreCheck and Verify.
+const sqlCountOrphanGeneralTplBibles = `SELECT count(*) FROM activities.general_template_bibles gtb WHERE NOT EXISTS (SELECT 1 FROM bibles.bible_sections bs WHERE bs.id = gtb.bible_id)`
+
+// sqlCountOrphanDevotionBibles counts devotions.devotion_bibles rows whose
+// bible_section_id has no matching row in bibles.bible_sections. Shared by PreCheck and Verify.
+const sqlCountOrphanDevotionBibles = `SELECT count(*) FROM devotions.devotion_bibles db WHERE NOT EXISTS (SELECT 1 FROM bibles.bible_sections bs WHERE bs.id = db.bible_section_id)`
+
 // ── Public API ────────────────────────────────────────────────────────────────
+
+// PreCheck counts cross-schema references that are ALREADY broken before the
+// backup/truncate cycle begins. Non-zero counts indicate rows whose
+// bible_section_id never matched any row in bibles.bible_sections — typically
+// caused by a previous re-crawl run without this migration tool, or by data
+// copied from a different environment with different bibles UUIDs.
+//
+// These rows CANNOT be recovered by the backup/restore cycle; they will remain
+// orphaned after restore. Call PreCheck before Backup so the operator can
+// decide whether to clean them up or look up the correct coordinates from
+// another environment before proceeding.
+func PreCheck(db *sqlx.DB) (PreCheckResult, error) {
+	var n1, n2, n3 int
+
+	if err := db.QueryRow(sqlCountOrphanGeneralBibles).Scan(&n1); err != nil {
+		return PreCheckResult{}, fmt.Errorf("pre-check general_bibles: %w", err)
+	}
+	if err := db.QueryRow(sqlCountOrphanGeneralTplBibles).Scan(&n2); err != nil {
+		return PreCheckResult{}, fmt.Errorf("pre-check general_template_bibles: %w", err)
+	}
+	if err := db.QueryRow(sqlCountOrphanDevotionBibles).Scan(&n3); err != nil {
+		return PreCheckResult{}, fmt.Errorf("pre-check devotion_bibles: %w", err)
+	}
+
+	return PreCheckResult{
+		GeneralBibles:         n1,
+		GeneralTemplateBibles: n2,
+		DevotionBibles:        n3,
+		Total:                 n1 + n2 + n3,
+	}, nil
+}
 
 // Backup creates and populates bibles._orphan_refs_backup with the stable
 // (book_sort, chapter_sort, section_sort) coordinates for every cross-schema
@@ -235,21 +289,15 @@ func Restore(db *sqlx.DB) (RestoreResult, error) {
 func Verify(db *sqlx.DB) (OrphanResult, error) {
 	var n1, n2, n3 int
 
-	if err := db.QueryRow(
-		`SELECT count(*) FROM activities.general_bibles gb WHERE NOT EXISTS (SELECT 1 FROM bibles.bible_sections bs WHERE bs.id = gb.bible_id)`,
-	).Scan(&n1); err != nil {
+	if err := db.QueryRow(sqlCountOrphanGeneralBibles).Scan(&n1); err != nil {
 		return OrphanResult{}, fmt.Errorf("verify general_bibles: %w", err)
 	}
 
-	if err := db.QueryRow(
-		`SELECT count(*) FROM activities.general_template_bibles gtb WHERE NOT EXISTS (SELECT 1 FROM bibles.bible_sections bs WHERE bs.id = gtb.bible_id)`,
-	).Scan(&n2); err != nil {
+	if err := db.QueryRow(sqlCountOrphanGeneralTplBibles).Scan(&n2); err != nil {
 		return OrphanResult{}, fmt.Errorf("verify general_template_bibles: %w", err)
 	}
 
-	if err := db.QueryRow(
-		`SELECT count(*) FROM devotions.devotion_bibles db WHERE NOT EXISTS (SELECT 1 FROM bibles.bible_sections bs WHERE bs.id = db.bible_section_id)`,
-	).Scan(&n3); err != nil {
+	if err := db.QueryRow(sqlCountOrphanDevotionBibles).Scan(&n3); err != nil {
 		return OrphanResult{}, fmt.Errorf("verify devotion_bibles: %w", err)
 	}
 

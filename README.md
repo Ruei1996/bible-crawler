@@ -23,7 +23,7 @@ A Go-based Bible crawler that populates a PostgreSQL database with a strict, nor
 - **Idempotent Writes**: Every DB write uses a `SELECT → INSERT → SELECT` pattern (race-condition safe for concurrent goroutines). Re-running the crawler never creates duplicates.
 - **Robust Encoding**: Automatically decodes **Big5** (Chinese pages from springbible.fhl.net) to UTF-8 before parsing.
 - **Fully Configurable**: Source URLs, concurrency, delays, and HTTP timeouts are all set via `.env` — no recompile needed when a website changes.
-- **Cross-Schema Migration** (`cmd/migrate`): Before truncating the `bibles` schema for a re-crawl, back up and restore UUID references held by other microservice schemas (`activities`, `devotions`) that lack declared FK constraints.
+- **Cross-Schema Migration** (`cmd/migrate`): Before truncating the `bibles` schema for a re-crawl, pre-check for already-broken references, then back up and restore UUID references held by other microservice schemas (`activities`, `devotions`) that lack declared FK constraints.
 - **Security Hardening**: `cmd/crawler/main.go` validates `SOURCE_ZH_URL`/`SOURCE_EN_URL` against an SSRF host allowlist at startup (CWE-918, OWASP A10:2021). `internal/database/database.go` injects `sslmode=require` when the DSN omits an explicit `sslmode` (CWE-319, OWASP A02:2021) and never logs DSN details on connection failure (CWE-532, OWASP A09:2021). Checkpoint paths in `internal/youversion/checkpoint.go` are validated with `filepath.IsLocal` to block `..` traversal (CWE-22, OWASP A04:2021). Output JSON files use mode `0o640` (owner rw, group r). Spec-builder output paths are guarded against path traversal via `filepath.IsLocal` and symlink resolution.
 
 ## 🧪 Testing
@@ -45,6 +45,7 @@ The project ships with a full two-tier test suite covering every internal packag
 | Package | Coverage | Test tier |
 |---------|----------|-----------|
 | `internal/config` | **100 %** | unit |
+| `internal/migration` | **100 %** | unit |
 | `internal/repository` | **100 %** | unit + integration |
 | `internal/spec` | **100 %** | unit |
 | `internal/youversion` | **100 %** | unit |
@@ -577,12 +578,36 @@ Use this procedure **instead of Step 5** whenever you need to TRUNCATE and re-po
 ### Step A — Backup (before TRUNCATE)
 
 ```bash
-# Captures (book_sort, chapter_sort, section_sort) for every referenced verse,
-# then truncates all 6 bibles tables immediately after.
+# Runs a pre-check first, then captures (book_sort, chapter_sort, section_sort)
+# for every referenced verse, then truncates all 6 bibles tables immediately after.
 go run cmd/migrate/main.go --phase=backup --truncate
 ```
 
 > Omit `--truncate` if you prefer to run `TRUNCATE TABLE bibles.bible_books CASCADE;` manually.
+
+**Expected output (clean environment — no pre-existing orphans):**
+```text
+Phase: backup — pre-checking for stale cross-schema references...
+Pre-check result (already-broken references before this migration):
+  activities.general_bibles:          0 rows
+  activities.general_template_bibles: 0 rows
+  devotions.devotion_bibles:           0 rows
+  Total:                               0 rows
+Capturing valid cross-schema bible references...
+Backup complete:
+  activities.general_bibles:          N rows
+  activities.general_template_bibles: N rows
+  devotions.devotion_bibles:           N rows
+  Total:                               N rows
+Truncating bibles tables (CASCADE)...
+Truncate complete. All 6 bibles tables cleared.
+```
+
+> **Pre-check = 0 rows** is the normal case. Proceed to Step B.
+
+> **If the pre-check prints a `WARNING`** (pre-existing stale references), those rows were already broken *before* this migration started — caused either by a previous re-crawl that ran without this tool, or by data copied from another environment with different bibles UUIDs. The migration cannot recover them. After restore, remediate with one of:
+> 1. **Delete** the stale rows: `DELETE FROM <table> WHERE NOT EXISTS (SELECT 1 FROM bibles.bible_sections WHERE id = <bible_section_col>);`
+> 2. **Remap** manually by looking up `(book_sort, chapter_sort, section_sort)` from another environment and re-pointing the UUIDs.
 
 ### Step B — Rebuild Spec (optional)
 

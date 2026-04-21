@@ -20,7 +20,7 @@
 - **冪等寫入（Idempotent）**：所有 DB 寫入使用 `SELECT → INSERT → SELECT` 三步驟模式（對併發 goroutine 安全無 race condition）。重複執行爬蟲不會產生重複資料。
 - **編碼處理**：自動將 springbible.fhl.net 中文頁面的 **Big5** 編碼轉換為 UTF-8 後再解析。
 - **完全可配置**：來源 URL、並行數、延遲與 HTTP 逾時皆透過 `.env` 設定，網站更新時無需重新編譯。
-- **跨 Schema 遷移**（`cmd/migrate`）：TRUNCATE `bibles` schema 重新爬取前，備份並還原其他微服務 schema（`activities`、`devotions`）中無宣告 FK 的 UUID 引用。
+- **跨 Schema 遷移**（`cmd/migrate`）：TRUNCATE `bibles` schema 重新爬取前，先偵測已損壞的引用（pre-check），再備份並還原其他微服務 schema（`activities`、`devotions`）中無宣告 FK 的 UUID 引用。
 - **安全性強化**：`cmd/crawler/main.go` 在啟動時對 `SOURCE_ZH_URL`/`SOURCE_EN_URL` 執行 SSRF 主機允許清單驗證（CWE-918，OWASP A10:2021）。`internal/database/database.go` 在 DSN 未明確指定 `sslmode` 時自動注入 `sslmode=require`（CWE-319，OWASP A02:2021），且連線失敗時不記錄 DSN 詳情（CWE-532，OWASP A09:2021）。`internal/youversion/checkpoint.go` 透過 `filepath.IsLocal` 驗證相對路徑，防止 `..` 路徑穿越（CWE-22，OWASP A04:2021）。輸出 JSON 檔案使用 `0o640` 權限（擁有者讀寫、群組唯讀）。Spec-builder 的輸出路徑也經過 `filepath.IsLocal` 與符號連結解析的雙重路徑穿越防護。bible.com 爬蟲的文本上有爭議的新約節號現在輸出 `content: ""` 並附加可讀的 `note` 說明欄位；`syncDisputedVersesZH()` 在每次爬取後執行，為 CUNP 靜默省略的 12 個爭議節在中文輸出中插入佔位符。
 
 ## 🧪 測試
@@ -42,6 +42,7 @@
 | 套件 | 覆蓋率 | 測試層級 |
 |------|--------|----------|
 | `internal/config` | **100 %** | 單元測試 |
+| `internal/migration` | **100 %** | 單元測試 |
 | `internal/repository` | **100 %** | 單元 + 整合測試 |
 | `internal/spec` | **100 %** | 單元測試 |
 | `internal/youversion` | **100 %** | 單元測試 |
@@ -573,10 +574,43 @@ go run cmd/biblecom-importer/main.go
 ### 步驟 A — 備份（TRUNCATE 前）
 
 ```bash
-# 記錄每個被引用節的穩定座標 (book_sort, chapter_sort, section_sort)，
+# 先偵測已損壞的引用（pre-check），再記錄有效引用的穩定座標，
 # 備份完成後立即 TRUNCATE 全部 6 張 bibles 資料表。
 go run cmd/migrate/main.go --phase=backup --truncate
 ```
+
+預期輸出範例（若存在已損壞的引用）：
+```text
+Phase: backup — pre-checking for stale cross-schema references...
+Pre-check result (already-broken references before this migration):
+  activities.general_bibles:          0 rows
+  activities.general_template_bibles: 0 rows
+  devotions.devotion_bibles:           3222 rows
+  Total:                               3222 rows
+WARNING: 3222 reference(s) are ALREADY broken and cannot be recovered by this migration.
+  These rows point to bibles.bible_sections UUIDs that no longer exist.
+  Root cause: a previous re-crawl ran without this migration tool,
+  or the rows were copied from a different environment with different bibles UUIDs.
+  After restore, the orphan-check will still report these rows.
+  Remedies (apply BEFORE or AFTER this migration):
+    1. DELETE the stale rows if they are no longer needed:
+       DELETE FROM <table> WHERE NOT EXISTS
+         (SELECT 1 FROM bibles.bible_sections WHERE id = <bible_section_col>);
+    2. Look up (book_sort, chapter_sort, section_sort) for each stale UUID
+       from another environment (e.g. production) and re-point them manually.
+  Continuing backup for the remaining valid references...
+Capturing valid cross-schema bible references...
+Backup complete:
+  activities.general_bibles:          0 rows
+  activities.general_template_bibles: 0 rows
+  devotions.devotion_bibles:           0 rows
+  Total:                               0 rows
+Truncating bibles tables (CASCADE)...
+Truncate complete. All 6 bibles tables cleared.
+```
+
+> **Pre-check 為 0 rows** 代表該環境的跨 Schema 引用完全乾淨，可正常進行備份/還原。  
+> **Pre-check 有 WARNING** 代表這些引用早在本次 migration 之前就已損壞（通常是先前某次重新爬取時未執行 migration tool，或資料從其他環境複製時 UUID 不一致）。Backup/Restore **無法修復**這些引用 ；需依 WARNING 訊息中的修復建議另行處理。
 
 > 若偏好手動執行 TRUNCATE，可省略 `--truncate`，改為手動執行 `TRUNCATE TABLE bibles.bible_books CASCADE;`。
 

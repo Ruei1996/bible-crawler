@@ -38,11 +38,106 @@ const (
 	matchUpdateGeneralBibles       = "UPDATE activities.general_bibles gb"
 	matchUpdateGeneralTplBibles    = "UPDATE activities.general_template_bibles gtb"
 	matchUpdateDevotionBibles      = "UPDATE devotions.devotion_bibles db"
-	matchVerifyGeneralBibles       = "FROM activities.general_bibles gb WHERE NOT EXISTS"
-	matchVerifyGeneralTplBibles    = "FROM activities.general_template_bibles gtb WHERE NOT EXISTS"
-	matchVerifyDevotionBibles      = "FROM devotions.devotion_bibles db WHERE NOT EXISTS"
+	matchCountOrphanGeneralBibles  = "FROM activities.general_bibles gb WHERE NOT EXISTS"
+	matchCountOrphanGeneralTplBibles = "FROM activities.general_template_bibles gtb WHERE NOT EXISTS"
+	matchCountOrphanDevotionBibles = "FROM devotions.devotion_bibles db WHERE NOT EXISTS"
 	matchDropBackupTable           = "DROP TABLE IF EXISTS bibles._orphan_refs_backup"
 )
+
+// matchVerify* and matchPreCheck* point at the same SQL constants — kept as
+// aliases so test names remain readable.
+const (
+	matchVerifyGeneralBibles    = matchCountOrphanGeneralBibles
+	matchVerifyGeneralTplBibles = matchCountOrphanGeneralTplBibles
+	matchVerifyDevotionBibles   = matchCountOrphanDevotionBibles
+)
+
+// ── PreCheck ──────────────────────────────────────────────────────────────────
+
+func TestPreCheck_NoStaleRefs(t *testing.T) {
+	db, mock := newMockDB(t)
+
+	countRow := func(n int) *sqlmock.Rows {
+		return sqlmock.NewRows([]string{"count"}).AddRow(n)
+	}
+	mock.ExpectQuery(qre(matchCountOrphanGeneralBibles)).WillReturnRows(countRow(0))
+	mock.ExpectQuery(qre(matchCountOrphanGeneralTplBibles)).WillReturnRows(countRow(0))
+	mock.ExpectQuery(qre(matchCountOrphanDevotionBibles)).WillReturnRows(countRow(0))
+
+	result, err := migration.PreCheck(db)
+
+	require.NoError(t, err)
+	assert.Equal(t, 0, result.GeneralBibles)
+	assert.Equal(t, 0, result.GeneralTemplateBibles)
+	assert.Equal(t, 0, result.DevotionBibles)
+	assert.Equal(t, 0, result.Total)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestPreCheck_WithStaleRefs(t *testing.T) {
+	db, mock := newMockDB(t)
+
+	countRow := func(n int) *sqlmock.Rows {
+		return sqlmock.NewRows([]string{"count"}).AddRow(n)
+	}
+	mock.ExpectQuery(qre(matchCountOrphanGeneralBibles)).WillReturnRows(countRow(1))
+	mock.ExpectQuery(qre(matchCountOrphanGeneralTplBibles)).WillReturnRows(countRow(0))
+	mock.ExpectQuery(qre(matchCountOrphanDevotionBibles)).WillReturnRows(countRow(3222))
+
+	result, err := migration.PreCheck(db)
+
+	require.NoError(t, err)
+	assert.Equal(t, 1, result.GeneralBibles)
+	assert.Equal(t, 0, result.GeneralTemplateBibles)
+	assert.Equal(t, 3222, result.DevotionBibles)
+	assert.Equal(t, 3223, result.Total)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestPreCheck_GeneralBiblesQueryError(t *testing.T) {
+	db, mock := newMockDB(t)
+
+	mock.ExpectQuery(qre(matchCountOrphanGeneralBibles)).WillReturnError(errDB)
+
+	_, err := migration.PreCheck(db)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "pre-check general_bibles")
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestPreCheck_GeneralTemplateBiblesQueryError(t *testing.T) {
+	db, mock := newMockDB(t)
+
+	countRow := func(n int) *sqlmock.Rows {
+		return sqlmock.NewRows([]string{"count"}).AddRow(n)
+	}
+	mock.ExpectQuery(qre(matchCountOrphanGeneralBibles)).WillReturnRows(countRow(0))
+	mock.ExpectQuery(qre(matchCountOrphanGeneralTplBibles)).WillReturnError(errDB)
+
+	_, err := migration.PreCheck(db)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "pre-check general_template_bibles")
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestPreCheck_DevotionBiblesQueryError(t *testing.T) {
+	db, mock := newMockDB(t)
+
+	countRow := func(n int) *sqlmock.Rows {
+		return sqlmock.NewRows([]string{"count"}).AddRow(n)
+	}
+	mock.ExpectQuery(qre(matchCountOrphanGeneralBibles)).WillReturnRows(countRow(0))
+	mock.ExpectQuery(qre(matchCountOrphanGeneralTplBibles)).WillReturnRows(countRow(0))
+	mock.ExpectQuery(qre(matchCountOrphanDevotionBibles)).WillReturnError(errDB)
+
+	_, err := migration.PreCheck(db)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "pre-check devotion_bibles")
+	require.NoError(t, mock.ExpectationsWereMet())
+}
 
 // ── Backup ────────────────────────────────────────────────────────────────────
 
