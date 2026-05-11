@@ -23,7 +23,7 @@ A Go-based Bible crawler that populates a PostgreSQL database with a strict, nor
 - **Idempotent Writes**: Every DB write uses a `SELECT → INSERT → SELECT` pattern (race-condition safe for concurrent goroutines). Re-running the crawler never creates duplicates.
 - **Robust Encoding**: Automatically decodes **Big5** (Chinese pages from springbible.fhl.net) to UTF-8 before parsing.
 - **Fully Configurable**: Source URLs, concurrency, delays, and HTTP timeouts are all set via `.env` — no recompile needed when a website changes.
-- **Cross-Schema Migration** (`cmd/migrate`): Before truncating the `bibles` schema for a re-crawl, pre-check for already-broken references, then back up and restore UUID references held by other microservice schemas (`activities`, `devotions`) that lack declared FK constraints.
+- **Cross-Schema Migration** (`cmd/migrate`): Before truncating the `bibles` schema for a re-crawl, pre-check for already-broken references, then back up and restore UUID references held by other microservice schemas (`activities`, `devotions`, `notes`) that lack declared FK constraints. Covers all four cross-schema reference tables including the polymorphic `notes.note_items.item_id` (rows where `category = 'bible'`).
 - **Security Hardening**: `cmd/crawler/main.go` validates `SOURCE_ZH_URL`/`SOURCE_EN_URL` against an SSRF host allowlist at startup (CWE-918, OWASP A10:2021). `internal/database/database.go` injects `sslmode=require` when the DSN omits an explicit `sslmode` (CWE-319, OWASP A02:2021) and never logs DSN details on connection failure (CWE-532, OWASP A09:2021). Checkpoint paths in `internal/youversion/checkpoint.go` are validated with `filepath.IsLocal` to block `..` traversal (CWE-22, OWASP A04:2021). Output JSON files use mode `0o640` (owner rw, group r). Spec-builder output paths are guarded against path traversal via `filepath.IsLocal` and symlink resolution.
 
 ## 🧪 Testing
@@ -567,13 +567,14 @@ Run `validation.sql` against your PostgreSQL database to verify completeness. Ke
 
 Use this procedure **instead of Step 5** whenever you need to TRUNCATE and re-populate the bibles schema in an environment that already contains data referencing `bibles.bible_sections` from other microservice schemas.
 
-> **Background**: Three tables store `bibles.bible_sections(id)` as a plain UUID without a declared FK constraint, so `TRUNCATE … CASCADE` does not reach them. After re-crawl every UUID changes, leaving these columns with stale references:
+> **Background**: Four tables store `bibles.bible_sections(id)` as a plain UUID without a declared FK constraint, so `TRUNCATE … CASCADE` does not reach them. After re-crawl every UUID changes, leaving these columns with stale references:
 >
-> | Table | Column |
-> |---|---|
-> | `activities.general_bibles` | `bible_id` |
-> | `activities.general_template_bibles` | `bible_id` |
-> | `devotions.devotion_bibles` | `bible_section_id` |
+> | Table | Column | Note |
+> |---|---|---|
+> | `activities.general_bibles` | `bible_id` | direct reference |
+> | `activities.general_template_bibles` | `bible_id` | direct reference |
+> | `devotions.devotion_bibles` | `bible_section_id` | direct reference |
+> | `notes.note_items` | `item_id` | **polymorphic** — only rows where `category = 'bible'` |
 
 ### Step A — Backup (before TRUNCATE)
 
@@ -592,12 +593,14 @@ Pre-check result (already-broken references before this migration):
   activities.general_bibles:          0 rows
   activities.general_template_bibles: 0 rows
   devotions.devotion_bibles:           0 rows
+  notes.note_items (category=bible):  0 rows
   Total:                               0 rows
 Capturing valid cross-schema bible references...
 Backup complete:
   activities.general_bibles:          N rows
   activities.general_template_bibles: N rows
   devotions.devotion_bibles:           N rows
+  notes.note_items (category=bible):  N rows
   Total:                               N rows
 Truncating bibles tables (CASCADE)...
 Truncate complete. All 6 bibles tables cleared.
@@ -668,12 +671,14 @@ Restore complete:
   activities.general_bibles updated:          N rows
   activities.general_template_bibles updated: N rows
   devotions.devotion_bibles updated:           N rows
+  notes.note_items updated (category=bible):  N rows
   Total:                                       N rows
 Verifying orphan counts...
 Orphan check:
   activities.general_bibles:          0
   activities.general_template_bibles: 0
   devotions.devotion_bibles:           0
+  notes.note_items (category=bible):  0
 All cross-schema references are valid.
 Cleaning up backup table...
 Backup table dropped.
@@ -715,7 +720,7 @@ bible-crawler/
 │   │   └── config_test.go        # Unit tests — 100 % coverage
 │   ├── database/                 # PostgreSQL connection setup
 │   │   └── database_test.go      # Integration tests (build tag: integration)
-│   ├── migration/                # Backup/restore logic for cross-schema bible refs
+│   ├── migration/                # Backup/restore logic for cross-schema bible refs (4 tables)
 │   │   └── migration_test.go     # Unit tests with go-sqlmock — 100 % coverage
 │   ├── model/                    # Go structs for DB tables (6 structs)
 │   ├── repository/               # Idempotent data-access layer (all SQL)

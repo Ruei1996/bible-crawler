@@ -30,18 +30,21 @@ var errDB = errors.New("db error")
 // Unique substrings used to match each SQL statement in mock expectations.
 // Each is chosen from a single line that appears only in that one SQL constant.
 const (
-	matchCreateBackupTable         = "CREATE TABLE IF NOT EXISTS bibles._orphan_refs_backup"
-	matchInsertGeneralBibles       = "'general_bibles',"
-	matchInsertGeneralTplBibles    = "'general_template_bibles',"
-	matchInsertDevotionBibles      = "'devotion_bibles',"
-	matchTruncateBibles            = "TRUNCATE TABLE bibles.bible_books CASCADE"
-	matchUpdateGeneralBibles       = "UPDATE activities.general_bibles gb"
-	matchUpdateGeneralTplBibles    = "UPDATE activities.general_template_bibles gtb"
-	matchUpdateDevotionBibles      = "UPDATE devotions.devotion_bibles db"
-	matchCountOrphanGeneralBibles  = "FROM activities.general_bibles gb WHERE NOT EXISTS"
+	matchCreateBackupTable           = "CREATE TABLE IF NOT EXISTS bibles._orphan_refs_backup"
+	matchInsertGeneralBibles         = "'general_bibles',"
+	matchInsertGeneralTplBibles      = "'general_template_bibles',"
+	matchInsertDevotionBibles        = "'devotion_bibles',"
+	matchInsertNoteItems             = "'note_items',"
+	matchTruncateBibles              = "TRUNCATE TABLE bibles.bible_books CASCADE"
+	matchUpdateGeneralBibles         = "UPDATE activities.general_bibles gb"
+	matchUpdateGeneralTplBibles      = "UPDATE activities.general_template_bibles gtb"
+	matchUpdateDevotionBibles        = "UPDATE devotions.devotion_bibles db"
+	matchUpdateNoteItems             = "UPDATE notes.note_items ni"
+	matchCountOrphanGeneralBibles    = "FROM activities.general_bibles gb WHERE NOT EXISTS"
 	matchCountOrphanGeneralTplBibles = "FROM activities.general_template_bibles gtb WHERE NOT EXISTS"
-	matchCountOrphanDevotionBibles = "FROM devotions.devotion_bibles db WHERE NOT EXISTS"
-	matchDropBackupTable           = "DROP TABLE IF EXISTS bibles._orphan_refs_backup"
+	matchCountOrphanDevotionBibles   = "FROM devotions.devotion_bibles db WHERE NOT EXISTS"
+	matchCountOrphanNoteItems        = "FROM notes.note_items ni WHERE"
+	matchDropBackupTable             = "DROP TABLE IF EXISTS bibles._orphan_refs_backup"
 )
 
 // matchVerify* and matchPreCheck* point at the same SQL constants — kept as
@@ -50,6 +53,7 @@ const (
 	matchVerifyGeneralBibles    = matchCountOrphanGeneralBibles
 	matchVerifyGeneralTplBibles = matchCountOrphanGeneralTplBibles
 	matchVerifyDevotionBibles   = matchCountOrphanDevotionBibles
+	matchVerifyNoteItems        = matchCountOrphanNoteItems
 )
 
 // ── PreCheck ──────────────────────────────────────────────────────────────────
@@ -63,6 +67,7 @@ func TestPreCheck_NoStaleRefs(t *testing.T) {
 	mock.ExpectQuery(qre(matchCountOrphanGeneralBibles)).WillReturnRows(countRow(0))
 	mock.ExpectQuery(qre(matchCountOrphanGeneralTplBibles)).WillReturnRows(countRow(0))
 	mock.ExpectQuery(qre(matchCountOrphanDevotionBibles)).WillReturnRows(countRow(0))
+	mock.ExpectQuery(qre(matchCountOrphanNoteItems)).WillReturnRows(countRow(0))
 
 	result, err := migration.PreCheck(db)
 
@@ -70,6 +75,7 @@ func TestPreCheck_NoStaleRefs(t *testing.T) {
 	assert.Equal(t, 0, result.GeneralBibles)
 	assert.Equal(t, 0, result.GeneralTemplateBibles)
 	assert.Equal(t, 0, result.DevotionBibles)
+	assert.Equal(t, 0, result.NoteItems)
 	assert.Equal(t, 0, result.Total)
 	require.NoError(t, mock.ExpectationsWereMet())
 }
@@ -83,6 +89,7 @@ func TestPreCheck_WithStaleRefs(t *testing.T) {
 	mock.ExpectQuery(qre(matchCountOrphanGeneralBibles)).WillReturnRows(countRow(1))
 	mock.ExpectQuery(qre(matchCountOrphanGeneralTplBibles)).WillReturnRows(countRow(0))
 	mock.ExpectQuery(qre(matchCountOrphanDevotionBibles)).WillReturnRows(countRow(3222))
+	mock.ExpectQuery(qre(matchCountOrphanNoteItems)).WillReturnRows(countRow(7))
 
 	result, err := migration.PreCheck(db)
 
@@ -90,7 +97,8 @@ func TestPreCheck_WithStaleRefs(t *testing.T) {
 	assert.Equal(t, 1, result.GeneralBibles)
 	assert.Equal(t, 0, result.GeneralTemplateBibles)
 	assert.Equal(t, 3222, result.DevotionBibles)
-	assert.Equal(t, 3223, result.Total)
+	assert.Equal(t, 7, result.NoteItems)
+	assert.Equal(t, 3230, result.Total)
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
@@ -139,6 +147,24 @@ func TestPreCheck_DevotionBiblesQueryError(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
+func TestPreCheck_NoteItemsQueryError(t *testing.T) {
+	db, mock := newMockDB(t)
+
+	countRow := func(n int) *sqlmock.Rows {
+		return sqlmock.NewRows([]string{"count"}).AddRow(n)
+	}
+	mock.ExpectQuery(qre(matchCountOrphanGeneralBibles)).WillReturnRows(countRow(0))
+	mock.ExpectQuery(qre(matchCountOrphanGeneralTplBibles)).WillReturnRows(countRow(0))
+	mock.ExpectQuery(qre(matchCountOrphanDevotionBibles)).WillReturnRows(countRow(0))
+	mock.ExpectQuery(qre(matchCountOrphanNoteItems)).WillReturnError(errDB)
+
+	_, err := migration.PreCheck(db)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "pre-check note_items")
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
 // ── Backup ────────────────────────────────────────────────────────────────────
 
 func TestBackup_Success(t *testing.T) {
@@ -148,6 +174,7 @@ func TestBackup_Success(t *testing.T) {
 	mock.ExpectExec(qre(matchInsertGeneralBibles)).WillReturnResult(sqlmock.NewResult(0, 3))
 	mock.ExpectExec(qre(matchInsertGeneralTplBibles)).WillReturnResult(sqlmock.NewResult(0, 2))
 	mock.ExpectExec(qre(matchInsertDevotionBibles)).WillReturnResult(sqlmock.NewResult(0, 5))
+	mock.ExpectExec(qre(matchInsertNoteItems)).WillReturnResult(sqlmock.NewResult(0, 4))
 
 	result, err := migration.Backup(db)
 
@@ -155,7 +182,8 @@ func TestBackup_Success(t *testing.T) {
 	assert.Equal(t, 3, result.GeneralBibles)
 	assert.Equal(t, 2, result.GeneralTemplateBibles)
 	assert.Equal(t, 5, result.DevotionBibles)
-	assert.Equal(t, 10, result.Total)
+	assert.Equal(t, 4, result.NoteItems)
+	assert.Equal(t, 14, result.Total)
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
@@ -166,6 +194,7 @@ func TestBackup_EmptyTables(t *testing.T) {
 	mock.ExpectExec(qre(matchInsertGeneralBibles)).WillReturnResult(sqlmock.NewResult(0, 0))
 	mock.ExpectExec(qre(matchInsertGeneralTplBibles)).WillReturnResult(sqlmock.NewResult(0, 0))
 	mock.ExpectExec(qre(matchInsertDevotionBibles)).WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec(qre(matchInsertNoteItems)).WillReturnResult(sqlmock.NewResult(0, 0))
 
 	result, err := migration.Backup(db)
 
@@ -228,6 +257,22 @@ func TestBackup_InsertDevotionBiblesError(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
+func TestBackup_InsertNoteItemsError(t *testing.T) {
+	db, mock := newMockDB(t)
+
+	mock.ExpectExec(qre(matchCreateBackupTable)).WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec(qre(matchInsertGeneralBibles)).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec(qre(matchInsertGeneralTplBibles)).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec(qre(matchInsertDevotionBibles)).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec(qre(matchInsertNoteItems)).WillReturnError(errDB)
+
+	_, err := migration.Backup(db)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "backup note_items")
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
 // ── TruncateBibles ────────────────────────────────────────────────────────────
 
 func TestTruncateBibles_Success(t *testing.T) {
@@ -261,6 +306,7 @@ func TestRestore_Success(t *testing.T) {
 	mock.ExpectExec(qre(matchUpdateGeneralBibles)).WillReturnResult(sqlmock.NewResult(0, 3))
 	mock.ExpectExec(qre(matchUpdateGeneralTplBibles)).WillReturnResult(sqlmock.NewResult(0, 2))
 	mock.ExpectExec(qre(matchUpdateDevotionBibles)).WillReturnResult(sqlmock.NewResult(0, 5))
+	mock.ExpectExec(qre(matchUpdateNoteItems)).WillReturnResult(sqlmock.NewResult(0, 4))
 
 	result, err := migration.Restore(db)
 
@@ -268,7 +314,8 @@ func TestRestore_Success(t *testing.T) {
 	assert.Equal(t, 3, result.GeneralBibles)
 	assert.Equal(t, 2, result.GeneralTemplateBibles)
 	assert.Equal(t, 5, result.DevotionBibles)
-	assert.Equal(t, 10, result.Total)
+	assert.Equal(t, 4, result.NoteItems)
+	assert.Equal(t, 14, result.Total)
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
@@ -311,6 +358,21 @@ func TestRestore_UpdateDevotionBiblesError(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
+func TestRestore_UpdateNoteItemsError(t *testing.T) {
+	db, mock := newMockDB(t)
+
+	mock.ExpectExec(qre(matchUpdateGeneralBibles)).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec(qre(matchUpdateGeneralTplBibles)).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec(qre(matchUpdateDevotionBibles)).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec(qre(matchUpdateNoteItems)).WillReturnError(errDB)
+
+	_, err := migration.Restore(db)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "restore note_items")
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
 // ── Verify ────────────────────────────────────────────────────────────────────
 
 func TestVerify_AllZero(t *testing.T) {
@@ -322,6 +384,7 @@ func TestVerify_AllZero(t *testing.T) {
 	mock.ExpectQuery(qre(matchVerifyGeneralBibles)).WillReturnRows(countRow(0))
 	mock.ExpectQuery(qre(matchVerifyGeneralTplBibles)).WillReturnRows(countRow(0))
 	mock.ExpectQuery(qre(matchVerifyDevotionBibles)).WillReturnRows(countRow(0))
+	mock.ExpectQuery(qre(matchVerifyNoteItems)).WillReturnRows(countRow(0))
 
 	result, err := migration.Verify(db)
 
@@ -329,6 +392,7 @@ func TestVerify_AllZero(t *testing.T) {
 	assert.Equal(t, 0, result.GeneralBibles)
 	assert.Equal(t, 0, result.GeneralTemplateBibles)
 	assert.Equal(t, 0, result.DevotionBibles)
+	assert.Equal(t, 0, result.NoteItems)
 	assert.Equal(t, 0, result.Total)
 	require.NoError(t, mock.ExpectationsWereMet())
 }
@@ -342,6 +406,7 @@ func TestVerify_WithOrphans(t *testing.T) {
 	mock.ExpectQuery(qre(matchVerifyGeneralBibles)).WillReturnRows(countRow(2))
 	mock.ExpectQuery(qre(matchVerifyGeneralTplBibles)).WillReturnRows(countRow(0))
 	mock.ExpectQuery(qre(matchVerifyDevotionBibles)).WillReturnRows(countRow(3))
+	mock.ExpectQuery(qre(matchVerifyNoteItems)).WillReturnRows(countRow(1))
 
 	result, err := migration.Verify(db)
 
@@ -349,7 +414,8 @@ func TestVerify_WithOrphans(t *testing.T) {
 	assert.Equal(t, 2, result.GeneralBibles)
 	assert.Equal(t, 0, result.GeneralTemplateBibles)
 	assert.Equal(t, 3, result.DevotionBibles)
-	assert.Equal(t, 5, result.Total)
+	assert.Equal(t, 1, result.NoteItems)
+	assert.Equal(t, 6, result.Total)
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
@@ -395,6 +461,24 @@ func TestVerify_DevotionBiblesQueryError(t *testing.T) {
 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "verify devotion_bibles")
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestVerify_NoteItemsQueryError(t *testing.T) {
+	db, mock := newMockDB(t)
+
+	countRow := func(n int) *sqlmock.Rows {
+		return sqlmock.NewRows([]string{"count"}).AddRow(n)
+	}
+	mock.ExpectQuery(qre(matchVerifyGeneralBibles)).WillReturnRows(countRow(0))
+	mock.ExpectQuery(qre(matchVerifyGeneralTplBibles)).WillReturnRows(countRow(0))
+	mock.ExpectQuery(qre(matchVerifyDevotionBibles)).WillReturnRows(countRow(0))
+	mock.ExpectQuery(qre(matchVerifyNoteItems)).WillReturnError(errDB)
+
+	_, err := migration.Verify(db)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "verify note_items")
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 

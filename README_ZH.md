@@ -20,7 +20,7 @@
 - **冪等寫入（Idempotent）**：所有 DB 寫入使用 `SELECT → INSERT → SELECT` 三步驟模式（對併發 goroutine 安全無 race condition）。重複執行爬蟲不會產生重複資料。
 - **編碼處理**：自動將 springbible.fhl.net 中文頁面的 **Big5** 編碼轉換為 UTF-8 後再解析。
 - **完全可配置**：來源 URL、並行數、延遲與 HTTP 逾時皆透過 `.env` 設定，網站更新時無需重新編譯。
-- **跨 Schema 遷移**（`cmd/migrate`）：TRUNCATE `bibles` schema 重新爬取前，先偵測已損壞的引用（pre-check），再備份並還原其他微服務 schema（`activities`、`devotions`）中無宣告 FK 的 UUID 引用。
+- **跨 Schema 遷移**（`cmd/migrate`）：TRUNCATE `bibles` schema 重新爬取前，先偵測已損壞的引用（pre-check），再備份並還原其他微服務 schema（`activities`、`devotions`、`notes`）中無宣告 FK 的 UUID 引用。涵蓋全部四張跨 Schema 引用資料表，包含多型欄位 `notes.note_items.item_id`（僅 `category = 'bible'` 的列）。
 - **安全性強化**：`cmd/crawler/main.go` 在啟動時對 `SOURCE_ZH_URL`/`SOURCE_EN_URL` 執行 SSRF 主機允許清單驗證（CWE-918，OWASP A10:2021）。`internal/database/database.go` 在 DSN 未明確指定 `sslmode` 時自動注入 `sslmode=require`（CWE-319，OWASP A02:2021），且連線失敗時不記錄 DSN 詳情（CWE-532，OWASP A09:2021）。`internal/youversion/checkpoint.go` 透過 `filepath.IsLocal` 驗證相對路徑，防止 `..` 路徑穿越（CWE-22，OWASP A04:2021）。輸出 JSON 檔案使用 `0o640` 權限（擁有者讀寫、群組唯讀）。Spec-builder 的輸出路徑也經過 `filepath.IsLocal` 與符號連結解析的雙重路徑穿越防護。bible.com 爬蟲的文本上有爭議的新約節號現在輸出 `content: ""` 並附加可讀的 `note` 說明欄位；`syncDisputedVersesZH()` 在每次爬取後執行，為 CUNP 靜默省略的 12 個爭議節在中文輸出中插入佔位符。
 
 ## 🧪 測試
@@ -563,13 +563,14 @@ go run cmd/biblecom-importer/main.go
 
 當需要在**已有其他微服務資料**引用 `bibles.bible_sections` 的環境下執行 TRUNCATE + 重跑爬蟲時，使用此流程取代步驟 5。
 
-> **背景說明**：以下三張表以純 UUID 欄位儲存 `bibles.bible_sections(id)`，且**未宣告 FK constraint**，因此 `TRUNCATE … CASCADE` 不會自動清理它們。重跑爬蟲後所有 UUID 都會改變，這些欄位將變成孤兒資料：
+> **背景說明**：以下**四張**表以純 UUID 欄位儲存 `bibles.bible_sections(id)`，且**未宣告 FK constraint**，因此 `TRUNCATE … CASCADE` 不會自動清理它們。重跑爬蟲後所有 UUID 都會改變，這些欄位將變成孤兒資料：
 >
-> | 資料表 | 欄位 |
-> |---|---|
-> | `activities.general_bibles` | `bible_id` |
-> | `activities.general_template_bibles` | `bible_id` |
-> | `devotions.devotion_bibles` | `bible_section_id` |
+> | 資料表 | 欄位 | 備註 |
+> |---|---|---|
+> | `activities.general_bibles` | `bible_id` | 直接引用 |
+> | `activities.general_template_bibles` | `bible_id` | 直接引用 |
+> | `devotions.devotion_bibles` | `bible_section_id` | 直接引用 |
+> | `notes.note_items` | `item_id` | **多型欄位**——僅 `category = 'bible'` 的列 |
 
 ### 步驟 A — 備份（TRUNCATE 前）
 
@@ -586,6 +587,7 @@ Pre-check result (already-broken references before this migration):
   activities.general_bibles:          0 rows
   activities.general_template_bibles: 0 rows
   devotions.devotion_bibles:           3222 rows
+  notes.note_items (category=bible):  0 rows
   Total:                               3222 rows
 WARNING: 3222 reference(s) are ALREADY broken and cannot be recovered by this migration.
   These rows point to bibles.bible_sections UUIDs that no longer exist.
@@ -604,6 +606,7 @@ Backup complete:
   activities.general_bibles:          0 rows
   activities.general_template_bibles: 0 rows
   devotions.devotion_bibles:           0 rows
+  notes.note_items (category=bible):  0 rows
   Total:                               0 rows
 Truncating bibles tables (CASCADE)...
 Truncate complete. All 6 bibles tables cleared.
@@ -661,7 +664,7 @@ go run cmd/biblecom-importer/main.go
 ### 步驟 D — 還原（爬蟲完成後）
 
 ```bash
-# 將 3 張跨 schema 資料表更新為新的 UUID，
+# 將 4 張跨 schema 資料表更新為新的 UUID，
 # 驗證孤兒數量（應全為 0），然後刪除備份表。
 go run cmd/migrate/main.go --phase=restore --cleanup
 ```
@@ -673,12 +676,14 @@ Restore complete:
   activities.general_bibles updated:          N rows
   activities.general_template_bibles updated: N rows
   devotions.devotion_bibles updated:           N rows
+  notes.note_items updated (category=bible):  N rows
   Total:                                       N rows
 Verifying orphan counts...
 Orphan check:
   activities.general_bibles:          0
   activities.general_template_bibles: 0
   devotions.devotion_bibles:           0
+  notes.note_items (category=bible):  0
 All cross-schema references are valid.
 Cleaning up backup table...
 Backup table dropped.
@@ -720,7 +725,7 @@ bible-crawler/
 │   │   └── config_test.go        # 單元測試 — 100 % 覆蓋率
 │   ├── database/                 # PostgreSQL 連線設定
 │   │   └── database_test.go      # 整合測試（build tag: integration）
-│   ├── migration/                # 跨 schema 聖經引用備份/還原邏輯
+│   ├── migration/                # 跨 schema 聖經引用備份/還原邏輯（4 張資料表）
 │   │   └── migration_test.go     # 單元測試（go-sqlmock）— 100 % 覆蓋率
 │   ├── model/                    # 對應資料庫的 Go Struct（6 個）
 │   ├── repository/               # 冪等資料存取層（所有 SQL）

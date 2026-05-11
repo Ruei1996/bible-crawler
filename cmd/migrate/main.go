@@ -78,6 +78,7 @@ func runBackup(db *sqlx.DB, withTruncate bool) {
 	log.Printf("  activities.general_bibles:          %d rows", precheck.GeneralBibles)
 	log.Printf("  activities.general_template_bibles: %d rows", precheck.GeneralTemplateBibles)
 	log.Printf("  devotions.devotion_bibles:           %d rows", precheck.DevotionBibles)
+	log.Printf("  notes.note_items (category=bible):  %d rows", precheck.NoteItems)
 	log.Printf("  Total:                               %d rows", precheck.Total)
 
 	if precheck.Total > 0 {
@@ -105,6 +106,7 @@ func runBackup(db *sqlx.DB, withTruncate bool) {
 	log.Printf("  activities.general_bibles:          %d rows", result.GeneralBibles)
 	log.Printf("  activities.general_template_bibles: %d rows", result.GeneralTemplateBibles)
 	log.Printf("  devotions.devotion_bibles:           %d rows", result.DevotionBibles)
+	log.Printf("  notes.note_items (category=bible):  %d rows", result.NoteItems)
 	log.Printf("  Total:                               %d rows", result.Total)
 
 	if withTruncate {
@@ -135,6 +137,7 @@ func runRestore(db *sqlx.DB, withCleanup bool) {
 	log.Printf("  activities.general_bibles updated:          %d rows", result.GeneralBibles)
 	log.Printf("  activities.general_template_bibles updated: %d rows", result.GeneralTemplateBibles)
 	log.Printf("  devotions.devotion_bibles updated:           %d rows", result.DevotionBibles)
+	log.Printf("  notes.note_items updated (category=bible):  %d rows", result.NoteItems)
 	log.Printf("  Total:                                       %d rows", result.Total)
 
 	log.Println("Verifying orphan counts...")
@@ -146,6 +149,7 @@ func runRestore(db *sqlx.DB, withCleanup bool) {
 	log.Printf("  activities.general_bibles:          %d", orphans.GeneralBibles)
 	log.Printf("  activities.general_template_bibles: %d", orphans.GeneralTemplateBibles)
 	log.Printf("  devotions.devotion_bibles:           %d", orphans.DevotionBibles)
+	log.Printf("  notes.note_items (category=bible):  %d", orphans.NoteItems)
 
 	if orphans.Total > 0 {
 		log.Printf("WARNING: %d orphan reference(s) remain. Review before using --cleanup.", orphans.Total)
